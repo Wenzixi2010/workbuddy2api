@@ -1213,6 +1213,7 @@
           <button onclick="detectClient()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" title="扫描本机安装的 WorkBuddy，读取真实的版本号与风控配置"><i class="fa-solid fa-magnifying-glass mr-1"></i> 探测本机客户端</button>
           <button onclick="toggleClientSource()" id="clientSourceBtn" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" title="切换取值策略"><i class="fa-solid fa-arrows-rotate mr-1"></i> 取值策略</button>
           <button onclick="saveClientProfile()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><i class="fa-solid fa-floppy-disk mr-1"></i> 保存</button>
+          <button onclick="pushClientProfileToOnline()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" title="把当前生效的客户端参数单独推送到线上实例（不动账号/模型）"><i class="fa-solid fa-cloud-arrow-up mr-1"></i> 同步客户端参数</button>
           <button onclick="resetClientProfile()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50" title="清空已保存值，回到「优先现场探测」"><i class="fa-solid fa-eraser mr-1"></i> 重置</button>
         </div>
       </div>
@@ -5194,6 +5195,39 @@ async function resetClientProfile(){
       message:"清空后台保存的值，回到「优先现场探测 + 内置兜底」。确认重置？", okText:"重置"})) return;
   const r = await api("/api/client-profile/reset",{method:"POST"});
   if(r.ok){ toast("已重置"); loadClientProfile(); } else toast("重置失败","err");
+}
+
+async function pushClientProfileToOnline(){
+  /* 只把当前生效的客户端参数（UA / 版本号 / 风控头）推送到线上实例，
+     不连带账号与模型。远程 URL 与密钥沿用「线上同步设置」里已保存的配置。 */
+  const cfg = await api("/api/sync/config");
+  if(!cfg.ok){ toast("读取同步配置失败","err"); return; }
+  const cd = await cfg.json().catch(()=>({}));
+  const remote_url = cd.remote_url || "";
+  const secret = cd.secret || "";
+  if(!remote_url || !secret){
+    toast("请先到「线上同步」面板配置远程 URL 与密钥","err");
+    return;
+  }
+  if(!await uiConfirm({kind:"warn", danger:false, title:"同步客户端参数",
+      message:`把当前生效的客户端参数（UA / 版本号 / 风控头）推送到 ${esc(remote_url)}？不会改动账号与模型配置。`, okText:"推送"})) return;
+  toast("正在推送客户端参数...","ok");
+  try{
+    const r = await api("/api/sync/push",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ remote_url, secret, only_client_profile: true })});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){ toast(`推送失败: ${esc(d.detail||"")}`,"err"); return; }
+    const cp = (d.remote_result||{}).client_profile;
+    let cpTxt = "";
+    if(cp && typeof cp === "object"){
+      cpTxt = cp.applied
+        ? ` · 已同步 ${(cp.fields||[]).length} 项`
+        : ` · 未应用${cp.errors?.length?"（"+esc(cp.errors.join("；"))+"）":""}`;
+    } else if(d.client_profile === false){
+      cpTxt = " · 客户端参数为空";
+    }
+    toast(`客户端参数已推送${cpTxt}`);
+  }catch(e){ toast("推送异常: "+e.message,"err"); }
 }
 
 async function detectClient(){

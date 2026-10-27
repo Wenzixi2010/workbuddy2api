@@ -59,6 +59,7 @@ def _generate_device_secret() -> str:
 class SyncConfigIn(BaseModel):
     remote_url: str = ""
     secret: str = ""
+    only_client_profile: bool = False  # 只推客户端参数（账号/模型列表置空，不动远端）
 
 
 def _get_setting(db: Session, key: str) -> str:
@@ -139,27 +140,29 @@ def push(
         )
 
     accounts = []
-    for a in db.query(Account).all():
-        accounts.append({
-            "uid": a.uid,
-            "name": a.name,
-            "enterprise_id": a.enterprise_id,
-            "domain": a.domain,
-            "status": a.status,
-            "auth_json": a.auth_json,
-            "balance_total": a.balance_total,
-            "balance_remain": a.balance_remain,
-        })
     models = []
-    for m in db.query(ModelConfig).all():
-        models.append({
-            "level": m.level,
-            "model_id": m.model_id,
-            "enabled": m.enabled,
-            "credit_multiplier": m.credit_multiplier or 0,
-            "credits_raw": m.credits_raw or "",
-            "note": m.note or "",
-        })
+    only_profile = bool((body.only_client_profile) if body else False)
+    if not only_profile:
+        for a in db.query(Account).all():
+            accounts.append({
+                "uid": a.uid,
+                "name": a.name,
+                "enterprise_id": a.enterprise_id,
+                "domain": a.domain,
+                "status": a.status,
+                "auth_json": a.auth_json,
+                "balance_total": a.balance_total,
+                "balance_remain": a.balance_remain,
+            })
+        for m in db.query(ModelConfig).all():
+            models.append({
+                "level": m.level,
+                "model_id": m.model_id,
+                "enabled": m.enabled,
+                "credit_multiplier": m.credit_multiplier or 0,
+                "credits_raw": m.credits_raw or "",
+                "note": m.note or "",
+            })
 
     # 客户端参数档案：把本地探测到的真实 UA / 版本号 / 风控头 / 指纹带过去。
     #
