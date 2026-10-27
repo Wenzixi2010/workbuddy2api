@@ -37,8 +37,8 @@ def scope_accounts(query, account_id=None, key_id=None):
         # Key 的完整绑定集合：主绑定 + 关联表。Key 活跃且至少有一个绑定时，
         # 把选号限定到这个集合内（多账号可正常轮换，而不是钉死主绑定）；
         # Key 没有任何绑定则保持公共池语义。
-        bound_ids = [int(r) for r in db.query(ApiKeyAccount.account_id).filter(
-            ApiKeyAccount.key_id == key_id).all() if r]
+        bound_ids = [int(r[0]) for r in query.session.query(ApiKeyAccount.account_id).filter(
+            ApiKeyAccount.key_id == key_id).all() if r[0]]
         key = query.session.query(ApiKey).filter(ApiKey.id == key_id).first()
         if key is not None and key.account_id and int(key.account_id) not in bound_ids:
             bound_ids.insert(0, int(key.account_id))
