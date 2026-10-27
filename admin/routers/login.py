@@ -792,3 +792,82 @@ def join_official_poll(body: OfficialIn, request: Request, db: Session = Depends
         "masked": _mask_name(out["account"].get("name") or out["uid"]),
     }
 
+
+# ---------------------------------------------------------------------------
+# 国际版设备授权登录（对齐 panel 项目 internal/panel/login.go：
+# 三端点在国际域，token → account → 凭证入库；state 会话复用 wb_login 的会话表）
+# ---------------------------------------------------------------------------
+
+class IntlStartIn(BaseModel):
+    site: Optional[str] = "intl"   # intl = 官方国际站 codebuddy.ai；workbuddy = 旧桌面端 workbuddy.ai
+
+
+@router.post("/intl/start")
+def intl_login_start(body: IntlStartIn, _: bool = Depends(require_admin)):
+    """发起国际版登录：拿 state + authUrl，前端弹授权页并轮询 /intl/poll。"""
+    site_id = str(body.site or "intl")
+    with _upstream_slot("intl_start"):
+        try:
+            sess = wb_login.intl_start_login(site_id)
+        except wb_login.WbLoginError as e:
+            raise _fail(e, 502)
+    return {"sid": sess.sid, "state": sess.plugin_state,
+            "auth_url": sess.plugin_auth_url, "site": wb_login.intl_site(site_id)["api"]}
+
+
+@router.get("/intl/poll/{sid}")
+def intl_login_poll(sid: str, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """轮询国际版登录态。
+
+    返回 `{"done": false}` 继续轮询；`{"done": true, ...}` 已入库；
+    `fatal: true` 表示上游终态拒绝（席位满/许可证过期等），前端应停止轮询。
+    """
+    try:
+        sess = wb_login.get_session(sid)
+    except wb_login.WbLoginError as e:
+        raise _fail(e, 502)
+
+    # 已成功过 -> 幂等复用
+    with sess.lock:
+        if sess.result_cache is not None:
+            cached = sess.result_cache
+            return {"done": True, **cached}
+
+        try:
+            with _upstream_slot("intl_poll"):
+                token = wb_login.intl_fetch_credential_by_state(
+                    sess.plugin_state, getattr(sess, "site_id", "intl"))
+        except wb_login.WbLoginError as e:
+            # 终态（12005/11212/11216）：告诉前端别再轮了
+            fatal = getattr(e, "code", 0) in wb_login._INTL_CODES_FATAL
+            if fatal:
+                sess.consumed = True
+                sess.consumed_at = time.time()
+                wb_login._sessions.pop(getattr(sess, "sid", ""), None)
+            raise HTTPException(status_code=400, detail={
+                "message": str(e), "step": getattr(e, "step", ""), "fatal": fatal})
+        except HTTPException as he:
+            if he.status_code == 503:
+                return {"done": False, "busy": True}
+            raise
+        if not token:
+            return {"done": False}
+
+        try:
+            credential, meta = wb_login.intl_build_credential_from_token(
+                token, getattr(sess, "site_id", "intl"))
+        except wb_login.WbLoginError as e:
+            raise _fail(e, 502)
+
+        out = _store_verified_credential(credential, meta, db)
+        result = {
+            "message": "登录成功",
+            "masked": _mask_name(out["account"].get("name") or out["uid"]),
+            "account_id": out.get("account", {}).get("id"),
+        }
+        sess.result_cache = dict(result)
+        sess.consumed = True
+        sess.consumed_at = time.time()
+
+    return {"done": True, **result}
+

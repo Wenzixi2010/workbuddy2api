@@ -1270,3 +1270,165 @@ def start_official_login() -> PhoneLoginSession:
 def gen_session_id() -> str:
     """暴露给路由层生成会话 id（也便于测试注入）。"""
     return secrets.token_urlsafe(16)
+
+
+# ---------------------------------------------------------------------------
+# 国际版设备授权登录（对齐 workbuddy2api-panel 的 internal/panel/login.go +
+# internal/loginsite 域表 —— 官方 CLI 设备授权流程，CN 短信链路之外的第二条路）
+# ---------------------------------------------------------------------------
+
+#: 官方 CLI 版本（对齐 panel 项目 loginsite.ClientVersion，写进授权链接 version 参数）。
+INTL_CLIENT_VERSION = "2.176.0"
+#: 设备授权链路 UA（与官方 CLI 同形）。
+INTL_UA = f"CLI/{INTL_CLIENT_VERSION} CodeBuddy/{INTL_CLIENT_VERSION}"
+
+#: 登录站点表（panel loginsite.go 的同构移植）。
+INTL_SITES = {
+    # 官方国际站（product.json externalDomain）
+    "intl": {
+        "api": "https://www.codebuddy.ai", "origin": "https://www.codebuddy.ai",
+        "platform": "CLI",
+    },
+    # 旧桌面端国际版
+    "workbuddy": {
+        "api": "https://www.workbuddy.ai", "origin": "https://www.workbuddy.ai",
+        "platform": "workbuddy",
+    },
+}
+
+#: 官方登录码语义（panel loginsite 码表移植）。
+_INTL_CODE_RETRY_FETCH_TOKEN = 11217     # login ing...（继续轮询）
+_INTL_CODE_RETRY_FETCH_ACCOUNT = 12151   # token 已发、账号信息未落库（继续轮询）
+_INTL_CODES_PENDING = (_INTL_CODE_RETRY_FETCH_TOKEN, _INTL_CODE_RETRY_FETCH_ACCOUNT)
+#: 终态许可错误（席位满 / 许可证过期 / 试用到期）——立刻停轮询。
+_INTL_CODES_FATAL = (12005, 11212, 11216)
+
+
+def intl_site(site_id: str) -> dict:
+    """按标识取站点定义；未知 → 官方国际站（intl）。"""
+    return INTL_SITES.get(str(site_id or "").lower().strip(), INTL_SITES["intl"])
+
+
+def _intl_envelope_error(resp: httpx.Response, step: str) -> WbLoginError:
+    """上游 {code,msg} 信封 → 结构化异常（err.step 上带官方 code 供路由层分诊）。"""
+    try:
+        obj = resp.json()
+    except Exception:
+        obj = {}
+    code = int(obj.get("code") or 0)
+    err = WbLoginError(str(obj.get("msg") or f"上游返回 code={code}"), step=step)
+    err.code = code          # 动态属性：pending / fatal 码表判定用
+    err.envelope = obj
+    return err
+
+
+def intl_start_login(site_id: str = "intl") -> PhoneLoginSession:
+    """发起国际版设备授权：POST auth/state 拿 state + authUrl（官方接力模式）。
+
+    与 `start_official_login()` 的区别只在站点：国际版三端点都在国际域上，
+    且授权链接要按官方 CLI 行为补 `version` 参数（platform=workbuddy 的
+    workbuddy.ai 站还要补 `ww_device_nonce` —— 本仓无 Turing SDK，不伪造）。
+    """
+    site = intl_site(site_id)
+    sess = _new_session()
+    sess.site_id = site_id
+    try:
+        r = sess.client.post(
+            f"{site['api']}/v2/plugin/auth/state?platform=CLI", json={},
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json, text/plain, */*",
+                     "X-Requested-With": "XMLHttpRequest",
+                     "Origin": site["origin"], "Referer": site["origin"] + "/",
+                     "User-Agent": INTL_UA})
+        data = _envelope_data(_upstream_json(r), "auth_state")
+        sess.plugin_state = str(data.get("state") or "")
+        sess.plugin_auth_url = str(data.get("authUrl") or "")
+        if not sess.plugin_state or not sess.plugin_auth_url:
+            raise WbLoginError("上游未返回授权地址", step="auth_state")
+        # 对齐官方 CLI：授权链接补 version（不伪造设备 nonce，缺值比错值安全）。
+        if "version=" not in sess.plugin_auth_url:
+            sep = "&" if "?" in sess.plugin_auth_url else "?"
+            sess.plugin_auth_url += f"{sep}version={INTL_CLIENT_VERSION}"
+    except WbLoginError:
+        sess.close()
+        raise
+    except Exception as e:
+        sess.close()
+        raise WbLoginError(f"发起国际版登录失败：{e}", step="start") from e
+
+    _register_session(sess)
+    return sess
+
+
+def intl_fetch_credential_by_state(state: str, site_id: str = "intl") -> dict | None:
+    """轮询国际版设备授权 state 换取凭证（未完成返回 None）。
+
+    与 `fetch_credential_by_state()` 的关键区别：
+      * 端点在国际域（随 site 切换）；
+      * 必须带 Origin/Referer + CLI UA（国际站 WAF 口径，缺了会被拦）；
+      * 官方码 12151（token 已发、账号未落库）也按 pending 处理。
+    """
+    site = intl_site(site_id)
+    try:
+        with httpx.Client(
+                headers={"User-Agent": INTL_UA},
+                timeout=httpx.Timeout(HTTP_TIMEOUT, connect=HTTP_CONNECT_TIMEOUT,
+                                      pool=HTTP_CONNECT_TIMEOUT)) as c:
+            r = c.get(f"{site['api']}/v2/plugin/auth/token", params={"state": state},
+                      headers={"Accept": "application/json, text/plain, */*",
+                               "X-Requested-With": "XMLHttpRequest",
+                               "Origin": site["origin"], "Referer": site["origin"] + "/",
+                               "X-No-Authorization": "true"})
+            obj = _upstream_json(r)
+    except httpx.HTTPError as e:
+        _logger.warning("intl login: 轮询 auth/token 网络错误 state=%s…: %s",
+                        state[:8], e)
+        return None
+
+    if obj.get("code") != 0:
+        code = int(obj.get("code") or 0)
+        if code in _INTL_CODES_PENDING:
+            _logger.info("intl login: 轮询未完成 state=%s… code=%s msg=%s",
+                         state[:8], code, str(obj.get("msg"))[:60])
+            return None
+        # 终态错误（席位满/许可证过期/试用到期）：抛给路由层直接终止轮询。
+        raise WbLoginError(str(obj.get("msg") or f"登录被上游拒绝（code={code}）"),
+                           step="auth_token", upstream=obj)
+    data = obj.get("data")
+    if not isinstance(data, dict) or not data.get("accessToken"):
+        _logger.warning("intl login: auth/token code=0 但没有 accessToken：%s",
+                        str(obj)[:200])
+        return None
+    return data
+
+
+def intl_build_credential_from_token(token: dict, site_id: str = "intl") -> tuple[str, dict]:
+    """国际版 token → 账号信息 → .info 凭证（domain 取 token 声明，缺省回落站点域）。"""
+    site = intl_site(site_id)
+    fallback_domain = urllib.parse.urlparse(site["api"]).netloc
+    domain = str(token.get("domain") or fallback_domain)
+    account: dict = {}
+    try:
+        with httpx.Client(headers={"User-Agent": INTL_UA},
+                          timeout=httpx.Timeout(HTTP_TIMEOUT, connect=HTTP_CONNECT_TIMEOUT,
+                                                pool=HTTP_CONNECT_TIMEOUT)) as c:
+            r = c.get(
+                f"{site['api']}/v2/plugin/accounts",
+                headers={"Accept": "application/json, text/plain, */*",
+                         "Authorization": "Bearer " + str(token["accessToken"]),
+                         "X-Domain": domain,
+                         "X-No-User-Id": "true",
+                         "X-No-Enterprise-Id": "true",
+                         "X-No-Department-Info": "true"})
+            obj = _upstream_json(r)
+            if obj.get("code") == 0:
+                accts = ((obj.get("data") or {}).get("accounts")) or []
+                account = accts[0] if accts else {}
+    except Exception as e:
+        _logger.warning("intl login: 取账号信息失败（继续用 token 里的信息）：%s", e)
+
+    built = build_credential_json(token, account)
+    check = validate_credential(built)
+    if not check.ok:
+        raise WbLoginError(f"生成的凭证未通过自检：{check.reason}", step="selfcheck")
+    return built, check.meta

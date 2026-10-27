@@ -818,7 +818,7 @@
           <p>登录新账号，或从本机与备份中恢复已有账号。</p>
         </div>
         <div class="intake-actions">
-          <button type="button" onclick="openPhoneLogin()" class="console-btn primary"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>手机号登录</button>
+          <button type="button" onclick="openLoginChoice()" class="console-btn primary"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>登录账号</button>
           <button type="button" onclick="openUpload()" class="console-btn "><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 16v4h16v-4"/></svg>导入账号</button>
           <span class="intake-divider" aria-hidden="true"></span>
           <button type="button" onclick="scanLocal()" class="console-btn quiet"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg>扫描本机</button>
@@ -3729,6 +3729,108 @@ async function resetCreditOrder() {
   await saveCreditOrder('automatic', [], '恢复按积分到期紧迫度自动排序，清除手动优先级。');
 }
 
+/* ==================== 登录账号（二级选择菜单：国内手机号 / 国际版） ====================
+ * 顶级按钮「登录账号」打开本菜单；手机号登录与国际版设备授权都从这里二级进入，
+ * 避免一级界面出现两种并排登录方式（对齐 panel 项目的「添加账号」二级菜单形态）。
+ */
+let _intlTimer = null;
+
+function openLoginChoice(accountId = null){
+  const acct = accountId ? `<p class="text-xs text-slate-500 mb-4">正在为账号 #${Number(accountId)} 重新登录，验证通过后原位更新凭证。</p>` : `<p class="text-xs text-slate-500 mb-4">选择登录方式，登录成功后凭证自动加入账号池。</p>`;
+  openModal(`
+    <h3 class="font-bold mb-1"><i class="fa-solid fa-right-to-bracket mr-1 text-emerald-600"></i> 登录账号</h3>
+    ${acct}
+    <button class="w-full text-left border rounded-lg px-4 py-3 mb-2 hover:border-emerald-500 transition" onclick="closeModal(); openPhoneLogin(${accountId ? Number(accountId) : 'null'})">
+      <div class="font-bold text-sm"><i class="fa-solid fa-mobile-screen-button mr-2 text-emerald-600"></i>手机号登录<span class="text-xs font-normal text-slate-400 ml-2">国内版 · 中国大陆/港澳</span></div>
+      <div class="text-xs text-slate-500 mt-1">输入手机号获取验证码，全自动完成授权换凭证。</div>
+    </button>
+    <button class="w-full text-left border rounded-lg px-4 py-3 mb-2 hover:border-indigo-500 transition" onclick="closeModal(); openIntlLogin(${accountId ? Number(accountId) : 'null'})">
+      <div class="font-bold text-sm"><i class="fa-solid fa-globe mr-2 text-indigo-600"></i>登录国际版<span class="text-xs font-normal text-slate-400 ml-2">codebuddy.ai / workbuddy.ai</span></div>
+      <div class="text-xs text-slate-500 mt-1">在官方授权页面登录国际版账号，系统自动完成设备授权接力。</div>
+    </button>
+    <div class="flex justify-end mt-2">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+    </div>`, "max-w-md");
+  $('#modal').dataset.closeOnly = '1';
+}
+
+/* 国际版登录：start → 弹授权页 → 轮询 poll（参考 panel 项目设备授权接力） */
+async function openIntlLogin(accountId = null){
+  openModal(`
+    <h3 class="font-bold mb-1"><i class="fa-solid fa-globe mr-1 text-indigo-600"></i> 登录国际版</h3>
+    <p class="text-xs text-slate-500 mb-3">1. 选择国际站点并打开授权页；2. 在官方页面完成登录；3. 本页自动接力换凭证入库。</p>
+    <label class="text-xs text-slate-500">国际站点</label>
+    <select id="intlSite" class="w-full border rounded-lg px-3 py-2 text-sm mb-3">
+      <option value="intl">CodeBuddy 国际站（www.codebuddy.ai）</option>
+      <option value="workbuddy">WorkBuddy 旧桌面端（www.workbuddy.ai）</option>
+    </select>
+    <div id="intlStep1">
+      <div class="flex justify-end gap-2">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+        <button id="intlOpenBtn" onclick="intlStart()" class="px-3 py-1.5 rounded-lg btn-primary">打开授权页</button>
+      </div>
+    </div>
+    <div id="intlStep2" class="hidden text-center py-3">
+      <i class="fa-solid fa-spinner fa-spin text-2xl text-indigo-500 mb-2"></i>
+      <p class="text-sm">等待你在官方页面完成登录…</p>
+      <p id="intlHint" class="text-xs text-slate-400 mt-1"></p>
+      <div class="flex justify-center gap-2 mt-4">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+      </div>
+    </div>
+    <div id="intlStep3" class="hidden text-center py-4">
+      <div id="intlResultIcon" class="text-4xl mb-2"></div>
+      <div id="intlResultMsg" class="text-sm"></div>
+      <div class="flex justify-center gap-2 mt-4">
+        <button onclick="closeModal(); loadAccounts()" class="px-3 py-1.5 rounded-lg btn-primary">完成</button>
+      </div>
+    </div>`, "max-w-md");
+  $('#modal').dataset.closeOnly = '1';
+}
+
+async function intlStart(){
+  const site = $('#intlSite').value;
+  const btn = $('#intlOpenBtn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>发起中…';
+  try {
+    const r = await api('/api/login/intl/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({site})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail && (d.detail.message || d.detail) || '发起失败');
+    window.open(d.auth_url, '_blank', 'noopener');
+    $('#intlStep1').classList.add('hidden');
+    $('#intlStep2').classList.remove('hidden');
+    _intlTimer = setInterval(() => intlPoll(d.sid), 3000);
+    intlPoll(d.sid);
+  } catch (e) {
+    toast(e.message || '发起失败', 'err');
+    btn.disabled = false; btn.textContent = '打开授权页';
+  }
+}
+
+async function intlPoll(sid){
+  try {
+    const r = await api('/api/login/intl/poll/' + encodeURIComponent(sid));
+    if (r.status === 400) {
+      const d = await r.json().catch(() => ({}));
+      const detail = d.detail || {};
+      clearInterval(_intlTimer);
+      $('#intlStep2').classList.add('hidden');
+      $('#intlStep3').classList.remove('hidden');
+      $('#intlResultIcon').innerHTML = '<i class="fa-solid fa-circle-xmark text-red-500"></i>';
+      $('#intlResultMsg').textContent = detail.message || '登录被拒绝';
+      return;
+    }
+    if (!r.ok) return; // 网络抖动：继续轮
+    const d = await r.json();
+    if (!d.done) { if ($('#intlHint')) $('#intlHint').textContent = d.message || ''; return; }
+    clearInterval(_intlTimer);
+    $('#intlStep2').classList.add('hidden');
+    $('#intlStep3').classList.remove('hidden');
+    $('#intlResultIcon').innerHTML = '<i class="fa-solid fa-circle-check text-emerald-500"></i>';
+    $('#intlResultMsg').textContent = (d.message || '登录成功') + (d.masked ? '（' + d.masked + '）' : '');
+  } catch (e) { /* 下一轮再试 */ }
+}
+
 /* ==================== 手机号登录（全自动授权换凭证） ====================
  * 与「批量上传」的区别：这里不需要用户手上有 .info 文件，
  * 应用户手机号 + 验证码，由**服务端**完成整条 auth 授权并把凭证直接入库。
@@ -4156,6 +4258,7 @@ function openReauthAccount(id) {
   openModal(`<h3 class="font-bold mb-2">重新登录 · 账号 #${Number(id)}</h3>
     <p class="text-sm mb-4">验证通过后更新原账号凭证，保留排序、Key 绑定与历史记录。模型日限不会因重登而重置。</p>
     <button class="console-btn mb-3" onclick="openPhoneLogin(${Number(id)})">手机号验证码登录</button>
+    <button class="console-btn mb-3 ml-2" onclick="openIntlLogin(${Number(id)})">国际版登录</button>
     <label class="block text-sm mb-2">上传凭证或备份文件 <input id="reauthFile" type="file" /></label>
     <p class="text-xs text-slate-500 mb-2">支持新版加密、旧版明文及 .info.bak-时间戳备份；将验证凭证是否仍可用、是否属于原账号。</p>
     <textarea id="reauthJson" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder="或粘贴最新账号凭证"></textarea>
