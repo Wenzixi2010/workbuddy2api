@@ -2348,7 +2348,8 @@ function accRow(a) {
         <div class="nm-sub">
           ${a.domain && (a.domain.includes("codebuddy.ai") || a.domain.includes("workbuddy.ai")) ? `<span class="fs-10-5" style="color:#6C4DFF" title="国际版账号（${esc(a.domain)}）">国际版</span>` : ''}
           <span class="c-uid" title="${esc(a.uid || "")}">${esc(a.uid || "-")}</span>
-          ${a.bound_key_id ? `<span class="text-indigo-600 fs-10-5" title="被 API Key 独占绑定">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</span>` : ''}
+        </div>
+        ${a.bound_key_id ? `<div class="nm-sub"><span class="text-indigo-600 fs-10-5" title="被 API Key 独占绑定">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</span></div>` : ''}
           ${a.post_login_automation ? `<small style="color:var(--fg-muted)" title="${esc((a.post_login_automation.result?.errors || []).join('；'))}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
           ${a.resource_initialization && a.resource_initialization.status !== 'completed' ? `<small style="color:var(--fg-muted)" title="${esc((a.resource_initialization.errors || []).join('；'))}">${esc(({queued:'余额与模型初始化排队中',running:'正在初始化余额与模型',failed:'初始化未完成，可刷新余额或同步模型',invalid_credential:'账号凭证不完整，请重新导入或授权登录'})[a.resource_initialization.status] || '')}</small>` : ''}
         </div>
