@@ -586,25 +586,30 @@
 }
 .acc-table tbody tr:hover td{ background:rgba(15,23,42,.022); }
 :root[data-theme="dark"] .acc-table tbody tr:hover td{ background:rgba(255,255,255,.035); }
-/* 名称列：**名字与 uid 同一行**。
- * 原来分两行（名字一行、uid 一行）把行高顶到 50px；
- * 合并后约 36px，一屏能多显示 4 行。uid 是次要信息，小字灰色跟在名字后面即可。 */
+/* 名称列：**名字独占一行，uid 与独占信息放第二行**。
+ * 同行挤压会让长账号名被截断（用户看到的是显示不全），
+ * 改为块级两行：第一行名字（完整显示），第二行小字灰色元信息。 */
 .acc-table .c-name{
   max-width:280px; overflow:hidden;
 }
 .acc-table .c-name .nm{
-  display:flex; align-items:baseline; gap:6px; min-width:0;
+  display:block; min-width:0;
 }
 .acc-table .c-name .nm > b{
-  font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  /* 账号名优先占满剩余宽度（此前写死 max-width:130px，长账号名显示不全）；
-     先挤 uid（uid 收缩系数更大），再轮到名字截断。 */
-  flex:1 1 auto; min-width:0; max-width:none;
+  display:block; font-weight:500;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  max-width:none;
+}
+.acc-table .c-name .nm-sub{
+  display:flex; align-items:center; gap:6px; margin-top:2px; min-width:0;
+}
+.acc-table .c-name .nm-sub > *{
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
 }
 .acc-table .c-uid{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10px;
-  color:var(--fg-subtle); overflow:hidden; text-overflow:ellipsis;
-  white-space:nowrap; flex:0 1 auto; min-width:0; max-width:110px;
+  color:var(--fg-subtle); flex:0 1 auto;
+  max-width:130px;
 }
 
 /* ==========================================================================
@@ -646,9 +651,10 @@
   }
   .acc-table tbody td.c-name::before{ content:none; }
   .acc-table .c-name .nm > b{ max-width:none; white-space:normal; }
-  .acc-table .c-name .nm{ flex-wrap:wrap; }
   /* uid 在窄屏允许换行显示全，别再截断 */
   .acc-table .c-uid{ max-width:none; white-space:normal; word-break:break-all; }
+  /* 第二行元信息（uid/独占）在窄屏允许换行 */
+  .acc-table .c-name .nm-sub{ flex-wrap:wrap; white-space:normal; }
   /* 到期那一格里的小字说明允许换行 */
   .acc-exp{ flex-wrap:wrap; white-space:normal; justify-content:flex-end; }
   /* 操作按钮右对齐、可换行 */
@@ -856,7 +862,7 @@
           <thead>
             <tr>
               <th>名称</th><th>状态</th>
-              <th class="text-right">总积分</th><th class="text-right">剩余</th>
+              <th style="min-width:150px">积分（剩余/总）</th>
               <th>积分到期</th>
               <th class="text-right">操作</th>
             </tr>
@@ -2285,6 +2291,36 @@ async function clearAccountCooldown(accountId) {
   loadAccounts();
 }
 
+/**
+ * 积分进度条（对齐 panel 项目 AccountsView 的 CreditCell：剩余/总 + 细进度条）。
+ * 颜色按剩余比例渐变：>60% 绿 → 30-60% 琥珀 → <30% 红；
+ * 条内叠加一层流动的渐变高光（CSS 动画持续运动），增强"余量在消耗"的感知。
+ * 总额缺失/为 0 时按本页最大余额作分母（panel 同款兜底）。
+ */
+function creditBar(a, soon) {
+  const remain = Number(a.balance_remain || 0);
+  const total = Number(a.balance_total || 0);
+  const unlimited = a.unlimited === true || total === -1;
+  let pct;
+  if (unlimited) pct = 100;
+  else if (total > 0) pct = Math.min(100, Math.round((remain / total) * 100));
+  else pct = null; // 无总额：只显示数字 + 装饰性动画条
+  const tone = unlimited || pct === null || pct > 60 ? 'ok' : (pct > 30 ? 'mid' : 'low');
+  const numColor = remain > 0 ? 'var(--ok,#059669)' : 'var(--danger)';
+  return `
+    <div class="cred-cell">
+      <div class="cred-n">
+        <span class="tnum font-medium" style="color:${numColor}">${remain}</span>
+        ${total > 0 && !unlimited ? `<span class="of tnum">/${total}</span>` : ''}
+        ${unlimited ? '<span class="of">不限</span>' : ''}
+        ${soon > 0 ? `<span class="fs-10-5" style="color:var(--warn)" title="7 天内到期">⏳${fmtCredit(soon)}</span>` : ''}
+      </div>
+      <div class="cred-bar tone-${tone}" title="${pct == null ? '无总额度参考' : '剩余 ' + pct + '%'}">
+        <i style="width:${pct == null ? 100 : pct}%"></i>
+      </div>
+    </div>`;
+}
+
 function accRow(a) {
   const soon = Number(a.credits_expiring_soon || 0);
   // 图标操作按钮抽成数组：顺序/配色一处可调，比 9 个 button 平铺更好维护
@@ -2309,18 +2345,17 @@ function accRow(a) {
     <td class="c-name">
       <div class="nm">
         <b title="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
-        ${a.domain && (a.domain.includes("codebuddy.ai") || a.domain.includes("workbuddy.ai")) ? `<span class="fs-10-5" style="color:#6C4DFF" title="国际版账号（${esc(a.domain)}）">国际版</span>` : ''}
-        <span class="c-uid" title="${esc(a.uid || "")}">${esc(a.uid || "-")}</span>
-        ${a.bound_key_id ? `<small class="text-indigo-600">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</small>` : ''}
-        ${a.post_login_automation ? `<small style="color:var(--fg-muted)" title="${esc((a.post_login_automation.result?.errors || []).join('；'))}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
+        <div class="nm-sub">
+          ${a.domain && (a.domain.includes("codebuddy.ai") || a.domain.includes("workbuddy.ai")) ? `<span class="fs-10-5" style="color:#6C4DFF" title="国际版账号（${esc(a.domain)}）">国际版</span>` : ''}
+          <span class="c-uid" title="${esc(a.uid || "")}">${esc(a.uid || "-")}</span>
+          ${a.bound_key_id ? `<span class="text-indigo-600 fs-10-5" title="被 API Key 独占绑定">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</span>` : ''}
+          ${a.post_login_automation ? `<small style="color:var(--fg-muted)" title="${esc((a.post_login_automation.result?.errors || []).join('；'))}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
           ${a.resource_initialization && a.resource_initialization.status !== 'completed' ? `<small style="color:var(--fg-muted)" title="${esc((a.resource_initialization.errors || []).join('；'))}">${esc(({queued:'余额与模型初始化排队中',running:'正在初始化余额与模型',failed:'初始化未完成，可刷新余额或同步模型',invalid_credential:'账号凭证不完整，请重新导入或授权登录'})[a.resource_initialization.status] || '')}</small>` : ''}
+        </div>
       </div>
     </td>
     <td class="col-status" data-label="状态">${badge(a.status)}${accountLimitBadge(a)}</td>
-    <td class="tnum text-right" data-label="总积分" style="color:var(--fg-muted)">${a.balance_total}</td>
-    <td class="tnum text-right font-medium" data-label="剩余" style="color:${a.balance_remain>0?'var(--ok,#059669)':'var(--danger)'}">
-      ${a.balance_remain}${soon > 0 ? `<span class="fs-10-5" style="color:var(--warn)"> (${fmtCredit(soon)})</span>` : ""}
-    </td>
+    <td class="col-credit" data-label="积分">${creditBar(a, soon)}</td>
     <td data-label="积分到期">${accExpiryCell(a)}${a.credits_collection ? `<small class="billing-state" data-tooltip="账单采集状态" data-tooltip-description="${esc((a.credits_collection.compatibility_fallback ? '兼容接口快照' : a.credits_collection.snapshot_preserved ? '保留上次完整快照' : '三路完整快照') + ' · ' + (a.credits_collection.failed_sources || []).join(' / ') + (a.credits_collection.remaining_difference == null ? '' : ' · 对账差值 ' + a.credits_collection.remaining_difference))}">${a.credits_collection.snapshot_preserved ? '采集不完整' : a.credits_collection.compatibility_fallback ? '兼容快照' : a.credits_collection.remaining_difference ? '账单有差异' : '三路已核对'}</small>` : ''}</td>
     <td class="c-ops" data-label="操作">${ops.map(([fn, ic, col, ttl]) =>
       `<button onclick="${fn}" class="${col}" data-tooltip="${ttl}" data-tooltip-description="${esc(accountActionDescription(ttl))}" aria-label="${ttl}">${consoleIcon(ic)}</button>`).join("")}</td>

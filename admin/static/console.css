@@ -518,3 +518,44 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
   font-size: 12px;
   text-align: center;
 }
+
+/* ── 账号池积分进度条（对齐 panel 项目 cred-bar，叠加流动渐变高光） ── */
+.cred-cell { min-width: 120px; }
+.cred-cell .cred-n {
+  display: flex; align-items: baseline; gap: 4px; white-space: nowrap;
+}
+.cred-cell .cred-n .of {
+  color: var(--fg-subtle); font-size: 11px;
+}
+.cred-bar {
+  margin-top: 4px; height: 4px; border-radius: 2px;
+  background: rgba(148, 163, 184, .22);
+  overflow: hidden; position: relative;
+}
+.cred-bar > i {
+  display: block; height: 100%; border-radius: 2px;
+  transition: width 240ms ease;
+  position: relative; overflow: hidden;
+}
+/* 按剩余比例分档配色：>60% 绿、30-60% 琥珀、<30% 红 */
+.cred-bar.tone-ok  > i { background: linear-gradient(90deg, #10b981, #34d399); }
+.cred-bar.tone-mid > i { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.cred-bar.tone-low > i { background: linear-gradient(90deg, #ef4444, #f87171); }
+/* 流动高光：一条 45° 亮带在填充色上循环平移（持续渐变运动效果）。
+ * prefers-reduced-motion 用户自动静止 —— 尊重系统无障碍设置。 */
+.cred-bar > i::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(115deg,
+      transparent 0%, transparent 35%,
+      rgba(255, 255, 255, .45) 50%,
+      transparent 65%, transparent 100%);
+  background-size: 250% 100%;
+  animation: credSheen 2.4s linear infinite;
+}
+@keyframes credSheen {
+  from { background-position: 120% 0; }
+  to   { background-position: -130% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cred-bar > i::after { animation: none; }
+}
