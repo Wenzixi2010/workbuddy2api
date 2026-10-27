@@ -129,6 +129,12 @@ from anthropic_adapter import (
 
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
+#: 国际版上游域（官方国际站 + 旧桌面端国际版）。国际版账号的凭证里
+#: `auth.domain` 是这两个域之一，上游请求必须发往对应国际域主机，
+#: 打 CN 域（copilot.tencent.com）会被上游拒绝。
+#: 依据：panel 项目 internal/upstream/client.go —— 国际站是 www.codebuddy.ai，
+#: workbuddy.ai 是旧桌面端主机名，同一后端，按凭证 domain 路由。
+INTL_DOMAINS = ("codebuddy.ai", "workbuddy.ai")
 #: 出站 User-Agent：**必须**伪装成官方客户端。
 #: 原来这里是 `codebuddy2openai/2.0` —— 一个自报家门的网关标识，上游「使用端」
 #: 列会直接显示它，等于对风控举手。（官方无任何 UA 随机化，故这里保持确定性。）
@@ -333,7 +339,7 @@ class CredentialManager:
         headers = self._build_headers_from(auth, s.get("account") or {})
         headers["X-Refresh-Token"] = auth.get("refreshToken", "")
         headers["X-Auth-Refresh-Source"] = "plugin"
-        url = f"{BACKEND}/v2/plugin/auth/token/refresh"
+        url = f"{self.api_base()}/v2/plugin/auth/token/refresh"
         try:
             with httpx.Client(timeout=15, limits=_HTTP_LIMITS) as c:
                 r = c.post(url, headers=headers, json={})
@@ -410,6 +416,22 @@ class CredentialManager:
                 h.update(extra)
             return h
 
+    def api_base(self) -> str:
+        """本凭证的上游基址：国际版账号（domain 为 codebuddy.ai / workbuddy.ai）
+        返回 `https://{domain}`，CN 账号返回 CN 域 BACKEND。
+
+        国际版与国内版是两套并存的站点：同一份代码、不同的主机名与域名，
+        token 只在签发它的域有效 —— 国际版凭证打 CN 域会被上游拒绝，
+        反之亦然。所以基址必须按凭证自身的 domain 路由（与官方客户端一致）。
+        """
+        try:
+            domain = str((self._session().get("auth") or {}).get("domain") or "")
+        except Exception:
+            domain = ""
+        if domain and any(d in domain for d in INTL_DOMAINS):
+            return f"https://{domain}"
+        return BACKEND
+
     def summary(self) -> dict:
         s = self._session()
         auth = s.get("auth") or {}
@@ -429,7 +451,7 @@ class CredentialManager:
 
     def _request_backend(self, method: str, path: str, json_body: dict | None = None) -> dict:
         """向后端发一个同步请求，返回 {code, msg, requestId, data} 或抛异常。"""
-        url = f"{BACKEND}{path}"
+        url = f"{self.api_base()}{path}"
         client_options = {}
         request_options = {}
         timeout = 15
@@ -469,7 +491,7 @@ class CredentialManager:
         属于正常业务结果，需要由调用方根据 code 区分处理，而非当作错误抛掉。
         """
         headers = self.get_headers()
-        url = f"{BACKEND}{path}"
+        url = f"{self.api_base()}{path}"
         try:
             with httpx.Client(timeout=15, limits=_HTTP_LIMITS) as c:
                 if method.upper() == "GET":
@@ -560,7 +582,7 @@ class CredentialManager:
                    "usage":{"output_image_counts":N,"credit":X}}}
         """
         headers = self.get_headers()
-        url = f"{BACKEND}/v2/images/generations"
+        url = f"{self.api_base()}/v2/images/generations"
         try:
             with httpx.Client(timeout=timeout, limits=_HTTP_LIMITS) as c:
                 r = c.post(url, headers=headers, json=body)
@@ -1018,7 +1040,7 @@ async def chat_completions(request: Request,
 
     headers = cred.get_headers()
     headers.update(_client_ip_headers(request))
-    url = f"{BACKEND}/v2/chat/completions"
+    url = f"{cred.api_base()}/v2/chat/completions"
     t0 = time.time()
 
     if client_wants_stream:
@@ -1398,7 +1420,7 @@ async def create_response(request: Request,
 
     headers = cred.get_headers()
     headers.update(_client_ip_headers(request))
-    url = f"{BACKEND}/v2/chat/completions"
+    url = f"{cred.api_base()}/v2/chat/completions"
     t0 = time.time()
 
     if client_wants_stream:
@@ -1530,7 +1552,7 @@ async def create_message(request: Request,
 
     headers = cred.get_headers()
     headers.update(_client_ip_headers(request))
-    url = f"{BACKEND}/v2/chat/completions"
+    url = f"{cred.api_base()}/v2/chat/completions"
     t0 = time.time()
 
     if client_wants_stream:

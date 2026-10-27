@@ -186,6 +186,10 @@ def init_db() -> bool:
         # Ownership must have a database constraint, including concurrent creates.
         next(i for i in models.ApiKey.__table__.indexes
              if i.name == "ux_api_keys_account").create(bind=engine, checkfirst=True)
+        # 单 Key 独占多账号：api_key_accounts 表 + 账号唯一约束（create_all 建表，
+        # 老库需要在这里幂等补索引，语义同 ux_api_keys_account）。
+        next(i for i in models.ApiKeyAccount.__table__.indexes
+             if i.name == "ux_api_key_accounts_account").create(bind=engine, checkfirst=True)
 
         # 迁移：使用记录/日志的查询索引。
         #

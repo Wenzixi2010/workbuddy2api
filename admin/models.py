@@ -132,6 +132,24 @@ class ApiKey(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ApiKeyAccount(Base):
+    """API Key 的额外独占账号绑定（单 Key 独占多账号）。
+
+    ApiKey.account_id 保留为「主绑定」（兼容老数据与既有查询），
+    本表存同一 Key 的其余独占账号。一个账号同时只能被一个 Key 独占：
+    account_id 上有唯一索引（ux_api_key_accounts_account），并发创建由
+    数据库约束兜底，语义与 ux_api_keys_account 一致。
+    """
+
+    __tablename__ = "api_key_accounts"
+    __table_args__ = (Index("ux_api_key_accounts_account", "account_id", unique=True),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key_id = Column(Integer, nullable=False, index=True)
+    account_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ModelGroup(Base):
     """模型分组：一组模型的命名集合，供 API Key 绑定以限制可用模型范围。"""
 

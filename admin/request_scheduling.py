@@ -31,7 +31,7 @@ def release_connection(db):
 
 
 def pool_budget(db, key, models):
-    count = scope_accounts(db.query(Account), getattr(key, 'account_id', None), key.id).filter(
+    count = scope_accounts(db.query(Account), None, key.id).filter(
         Account.status == 'active').count()
     release_connection(db)
     return SweepBudget(count, len(models))

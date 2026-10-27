@@ -590,19 +590,21 @@
  * 原来分两行（名字一行、uid 一行）把行高顶到 50px；
  * 合并后约 36px，一屏能多显示 4 行。uid 是次要信息，小字灰色跟在名字后面即可。 */
 .acc-table .c-name{
-  max-width:230px; overflow:hidden;
+  max-width:280px; overflow:hidden;
 }
 .acc-table .c-name .nm{
   display:flex; align-items:baseline; gap:6px; min-width:0;
 }
 .acc-table .c-name .nm > b{
   font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  max-width:130px;
+  /* 账号名优先占满剩余宽度（此前写死 max-width:130px，长账号名显示不全）；
+     先挤 uid（uid 收缩系数更大），再轮到名字截断。 */
+  flex:1 1 auto; min-width:0; max-width:none;
 }
 .acc-table .c-uid{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10px;
   color:var(--fg-subtle); overflow:hidden; text-overflow:ellipsis;
-  white-space:nowrap; max-width:92px;
+  white-space:nowrap; flex:0 1 auto; min-width:0; max-width:110px;
 }
 
 /* ==========================================================================
@@ -702,23 +704,28 @@
 <div id="localBoot"><img src="/api/app/icon" alt=""/><p id="localBootStatus">正在打开本地工作台…</p><button type="button" onclick="WBDesktop.retryLocal()">重新连接</button></div>
 
 <!-- 登录 -->
-<div id="login" class="min-h-screen flex items-center justify-center bg-wb">
-  <div class="rounded-2xl w-full max-w-sm p-8 fade-in"
-       style="background:var(--surface); box-shadow:var(--sh-2); border:1px solid var(--border)">
-    <div class="text-center mb-6">
-      <div class="w-14 h-14 rounded-2xl bg-wb flex items-center justify-center mx-auto">
-        <i class="fa-solid fa-share-nodes text-2xl text-white"></i>
+<div id="login" class="login-wrap">
+  <form class="login-card" onsubmit="event.preventDefault(); doLogin();">
+    <div class="login-brand">
+      <div class="login-logo" aria-hidden>
+        <img src="/api/app/icon" alt="" width="26" height="26" />
       </div>
-      <h1 class="text-xl font-bold mt-4">WorkBuddy 共享管理后台</h1>
-      <p class="text-sm mt-1" style="color:var(--fg-muted)">多账号轮换 · API Key 网关 · 模型配置</p>
+      <div>
+        <div class="login-title">WorkBuddy2API</div>
+        <div class="login-sub">控制台登录</div>
+      </div>
     </div>
-    <input id="username" class="w-full border rounded-lg px-3 py-2.5 mb-3 text-sm" placeholder="用户名" value="admin" />
-    <input id="password" type="password" class="w-full border rounded-lg px-3 py-2.5 mb-4 text-sm" placeholder="密码" />
-    <button id="loginBtn" onclick="doLogin()" class="w-full btn-primary rounded-lg py-2.5 text-sm font-medium">
-      <i class="fa-solid fa-right-to-bracket mr-1"></i> 登录
-    </button>
-    <p id="loginErr" class="text-red-500 text-xs mt-3 text-center hidden"></p>
-  </div>
+    <label class="login-fld">
+      <span>账号</span>
+      <input id="username" autoComplete="username" placeholder="用户名" value="admin" />
+    </label>
+    <label class="login-fld">
+      <span>密码</span>
+      <input id="password" type="password" autoComplete="current-password" placeholder="密码" />
+    </label>
+    <button id="loginBtn" type="submit" class="console-btn primary login-btn">登录</button>
+    <p id="loginErr" class="login-err hidden"></p>
+  </form>
 </div>
 
 <!-- 主界面 -->
@@ -2302,6 +2309,7 @@ function accRow(a) {
     <td class="c-name">
       <div class="nm">
         <b title="${esc(a.name || "未命名")}">${esc(a.name || "未命名")}</b>
+        ${a.domain && (a.domain.includes("codebuddy.ai") || a.domain.includes("workbuddy.ai")) ? `<span class="fs-10-5" style="color:#6C4DFF" title="国际版账号（${esc(a.domain)}）">国际版</span>` : ''}
         <span class="c-uid" title="${esc(a.uid || "")}">${esc(a.uid || "-")}</span>
         ${a.bound_key_id ? `<small class="text-indigo-600">Key 独占：${esc(a.bound_key_name || ("#" + a.bound_key_id))}</small>` : ''}
         ${a.post_login_automation ? `<small style="color:var(--fg-muted)" title="${esc((a.post_login_automation.result?.errors || []).join('；'))}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
@@ -3941,7 +3949,7 @@ async function plVerify(){
 function openUpload(){
   openModal(`
     <h3 class="font-bold mb-3"><i class="fa-solid fa-file-import mr-1"></i> 批量上传账号</h3>
-    <p class="text-xs text-slate-500 mb-2">粘贴 WorkBuddy 登录态，支持单个 JSON、JSON 数组或每行一个 JSON。也可选择多个凭证文件：新版加密、旧版明文及 .info.bak-时间戳备份均支持，按文件内容验证。</p>
+    <p class="text-xs text-slate-500 mb-2">粘贴 WorkBuddy 登录态，支持单个 JSON、JSON 数组或每行一个 JSON。也可选择多个凭证文件：新版加密、旧版明文及 .info.bak-时间戳备份均支持，按文件内容验证。国内版与国际版（codebuddy.ai / workbuddy.ai 登录导出的凭证）均可导入，网关按凭证内 domain 自动路由到对应站点。</p>
     <p class="text-xs text-amber-600 mb-2"><i class="fa-solid fa-shield-halved mr-1"></i>每条都会调真实上游接口验证是否可用，<b>伪造的凭证会被拒收</b>（因此上传略慢，属正常）。</p>
     <textarea id="upText" class="w-full border rounded-lg p-2 text-xs h-40 font-mono" placeholder='{"auth":{...},"account":{...}}'></textarea>
     <input id="upFile" type="file" multiple class="upload-file-input" aria-label="选择账号凭证或备份文件" />
@@ -4198,7 +4206,7 @@ async function submitAddAccount(){
 function keyRow(k) {
   return `
     <tr class="border-t hover:bg-slate-50">
-      <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${k.account_id ? `独占账号：${esc(k.account_name || ("#" + k.account_id))}` : "公共账号池"}</div></td>
+      <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${(k.account_ids && k.account_ids.length > 1) ? `独占账号（${k.account_ids.length} 个）：${esc((k.account_names || []).join("、"))}` : k.account_id ? `独占账号：${esc(k.account_name || ("#" + k.account_id))}` : "公共账号池"}</div></td>
       <td class="px-4 py-3 font-mono text-xs text-slate-500">${esc(k.masked)}</td>
       <td class="px-4 py-3">${k.unlimited?"∞":k.credit_limit}</td>
       <td class="px-4 py-3 ${k.credit_used>=k.credit_limit&&!k.unlimited?'text-red-500':''}">${k.credit_used}</td>
@@ -4317,10 +4325,25 @@ async function keyAccountOptions(key) {
     options.push({ value: String(key.account_id), label: `原绑定账号 #${key.account_id}（不存在）` });
   return options;
 }
-function keyAccountSelect(id, options, value = 0) {
+function keyAccountSelect(id, options, value = 0, selectedIds = null) {
+  // 单 Key 独占多账号：渲染成勾选列表。selectedIds 传数组时用多选形态；
+  // 不传（旧调用）时退化为原来的单选下拉。
+  if (Array.isArray(selectedIds)) {
+    const boxes = options.filter(o => o.value !== "0").map(o =>
+      `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} /> <span>${esc(o.label)}</span></label>`
+    ).join("") || `<p class="text-xs text-slate-400">暂无可绑定账号</p>`;
+    return `<div class="mb-3"><label class="text-xs text-slate-500">独占绑定账号（可多选）</label>
+      <div id="${id}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
+      <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
+      <p class="text-[11px] text-slate-400 mt-1">可勾选多个账号：此 Key 独占这些账号并在其间轮换，公共池跳过它们。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
+  }
   return `<div class="mb-3"><label class="text-xs text-slate-500">独占绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
     <p class="text-[11px] text-slate-400 mt-1">绑定后公共池跳过该账号；此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
+}
+function keyAccountIds(id) {
+  if (document.getElementById(id + "None")?.checked) return [];
+  return [...document.querySelectorAll(`#${id} .wba-key-acc:checked`)].map(el => Number(el.value));
 }
 async function openAddKey(){
   let accountOptions;
@@ -4352,7 +4375,7 @@ async function openAddKey(){
       })}</div>
       <p class="text-[11px] text-slate-400 mt-1">选择后该 Key 只能调用组内模型，调用组外模型返回 403。</p>
     </div>
-    ${keyAccountSelect("kAccount", accountOptions)}
+    ${keyAccountSelect("kAccount", accountOptions, 0, [])}
     <input id="kNote" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="备注（可选）" />
     <div class="flex justify-end gap-2 mt-2">
       <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
@@ -4363,7 +4386,7 @@ async function submitAddKey(){
   const unlimited = $("#kUnlimited").checked || $("#kLimit").value.trim() === "";
   const mcRaw = $("#kMaxConcurrent").value;
   const rpmRaw = $("#kRatePerMinute").value;
-  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_id: Number(uiSelectValue("kAccount")||0),
+  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_ids: keyAccountIds("kAccount"),
     max_concurrent: mcRaw === "" ? null : Number(mcRaw), rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw) };
   const r = await api("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d = await r.json().catch(()=>({}));
@@ -4434,7 +4457,7 @@ async function editKey(id){
     })}</div>
     <p class="text-[11px] text-slate-400 -mt-2 mb-3">不限制 = 可用全部启用模型；选了分组则只能调用组内模型。</p>
 
-    ${keyAccountSelect("ekAccount", accountOptions, k.account_id)}
+    ${keyAccountSelect("ekAccount", accountOptions, k.account_id || 0, k.account_ids || (k.account_id ? [k.account_id] : []))}
     <label class="block text-xs text-slate-500 mb-1">积分限额（credits）</label>
     <input id="ekLimit" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm" value="${k.unlimited ? "" : k.credit_limit}" placeholder="留空不限额；填写 0 表示零额度" oninput="document.getElementById('ekUnlimited').checked=this.value.trim()===''" />
     <label class="flex items-center gap-2 text-sm mb-1"><input id="ekUnlimited" type="checkbox" onchange="if(this.checked) document.getElementById('ekLimit').value=''" ${k.unlimited ? "checked" : ""} /> 不限额（∞）</label>
@@ -4459,7 +4482,7 @@ async function submitEditKey(id){
   const body = {
     name,
     group_id: Number(uiSelectValue("ekGroup") || 0),
-    account_id: Number(uiSelectValue("ekAccount") || 0),
+    account_ids: keyAccountIds("ekAccount"),
     credit_limit: Number($("#ekLimit").value || 0),
     unlimited: $("#ekUnlimited").checked || $("#ekLimit").value.trim() === "",
     max_concurrent: mcRaw === "" ? null : Number(mcRaw),
@@ -4605,7 +4628,7 @@ function modelRow(m) {
       <td class="px-4 py-3 text-slate-400 text-xs">${esc(m.note||'-')}</td>
       <td class="px-4 py-3 col-status">${m.enabled?'<span class="badge bg-emerald-100 text-emerald-700">启用</span>':'<span class="badge bg-slate-100 text-slate-500">禁用</span>'}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
-        <button onclick="speedTestModel(${esc(JSON.stringify(m.model_id))}, this)" class="text-sky-600 hover:text-sky-800 text-sm mr-2" title="检测模型延迟与健康（真实请求，可能消耗少量积分）"><i class="fa-solid fa-gauge-high"></i></button>
+        <button onclick="openModelTest(${esc(JSON.stringify(m.model_id))}, this)" class="text-sky-600 hover:text-sky-800 text-sm mr-2" title="检测模型延迟与健康（真实请求，可能消耗少量积分；可选指定 API Key）"><i class="fa-solid fa-gauge-high"></i></button>
         <button onclick="toggleModel(${m.id},${!m.enabled})" class="${m.enabled?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} text-sm mr-2" title="${m.enabled?'禁用':'启用'}"><i class="fa-solid ${m.enabled?'fa-ban':'fa-check'}"></i></button>
         <button onclick="deleteModelConfig(${m.id})" class="text-red-500 hover:text-red-700" title="移除"><i class="fa-solid fa-trash"></i></button>
       </td>
@@ -4722,13 +4745,34 @@ async function enableAllModels(enabled){
   finally { _modelBatchBusy = false; }
 }
 let _modelBatchBusy = false;
+async function openModelTest(modelId, btn){
+  /* 模型检测弹窗：可选指定 API Key（用该 Key 的独占账号池检测）。 */
+  let keyOptions = [{ value: "0", label: "公共账号池（默认，自动选号）" }];
+  try {
+    const r = await api("/api/keys");
+    const { ok, data } = await safeJson(r);
+    if (ok) keyOptions = keyOptions.concat((data.items || [])
+      .filter(k => k.status === "active")
+      .map(k => ({ value: String(k.id), label: `${k.name || "未命名"} #${k.id}${(k.account_ids||[]).length ? ` · 独占 ${k.account_ids.length} 个账号` : " · 公共池"}` })));
+  } catch (e) { /* Key 列表拉取失败不阻塞，仍可用公共池检测 */ }
+  window._modelTestModel = modelId;
+  openModal(`
+    <h3 class="font-bold mb-3"><i class="fa-solid fa-gauge-high mr-1"></i> 模型检测 — ${esc(modelId)}</h3>
+    <label class="block text-xs text-slate-500 mb-1">使用的 API Key（可选）</label>
+    <div class="mb-2">${uiSelectHTML("mtKey", { value: "0", options: keyOptions })}</div>
+    <p class="text-[11px] text-slate-400 mb-3">指定 Key 后，检测请求使用该 Key 独占绑定的账号；未绑定则回退公共池。用量会计入该 Key。</p>
+    <div class="flex justify-end gap-2 mt-2">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+      <button id="mtRunBtn" onclick="speedTestModel(window._modelTestModel, this)" class="px-3 py-1.5 rounded-lg btn-primary">开始检测</button>
+    </div>`);
+}
 async function speedTestModel(modelId, btn){
   if(_modelProbeBusy || (btn && btn.disabled)) return;
   _modelProbeBusy = true;
   const old = btn ? btn.innerHTML : "";
   if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
   try{
-    const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId})});
+    const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId, key_id: Number(uiSelectValue("mtKey")||0)})});
     const d = await r.json();
     if(!r.ok){ toast(`测速失败(${modelId}): ${esc(d.detail||"")}`,"err"); return; }
     _modelProbes[modelId] = d;
@@ -4738,6 +4782,7 @@ async function speedTestModel(modelId, btn){
     const comp = d.completion_tokens!=null ? d.completion_tokens : (d.total_tokens??0);
     const prompt = d.prompt_tokens!=null ? d.prompt_tokens : "—";
     toast(`<b>${esc(modelId)}</b> 测速：首字 ${ttft} · 提示 ${prompt} / 补全 ${comp} tok · ${sp}` + (d.account?` · 账号 ${esc(d.account)}`:""), "ok");
+    closeModal();
   }catch(e){ toast("测速异常: "+e.message,"err"); }
   finally{ _modelProbeBusy = false; if(btn){ btn.disabled=false; btn.innerHTML = old; } }
 }

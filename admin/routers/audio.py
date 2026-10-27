@@ -134,7 +134,7 @@ async def _transcribe(request, db, key, audio, filename, mime, response_format):
         if POOL.waf.active():
             return error(503, "出口保护中，请稍后重试", "service_unavailable")
         acc = await proxy._blocking_call(proxy._select_account, db, exclude_ids=tried,
-                                       account_id=key.account_id, key_id=key.id, min_balance=0, model=MODEL)
+                                       key_id=key.id, min_balance=0, model=MODEL)
         if acc is None:
             break
         budget.consume()
@@ -152,7 +152,7 @@ async def _transcribe(request, db, key, audio, filename, mime, response_format):
             headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type", "content-length")}
             await proxy._blocking_call(release_connection, db)
             async with upstream_http.client(request, httpx.Timeout(30, connect=10), backend.HTTP_LIMITS, retry_budget=budget) as client:
-                response = await client.post(settings.BACKEND + "/agenttool/v1/asr", headers=headers,
+                response = await client.post(sess.cm.api_base() + "/agenttool/v1/asr", headers=headers,
                                              files={"audio": (filename, audio, mime)})
             try:
                 payload = response.json()

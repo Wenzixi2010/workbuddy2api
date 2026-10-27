@@ -264,7 +264,7 @@ class AccountSession:
     def fetch_model_busy(self, models: list[str]) -> dict:
         """Official desktop endpoint: at most 50 models, five-second timeout."""
         with httpx.Client(timeout=5) as client:
-            response = client.post(f"{BACKEND}/v2/chat/busy", json={"models": models},
+            response = client.post(f"{self.cm.api_base()}/v2/chat/busy", json={"models": models},
                                    headers=self.get_headers(cprofile.risk_headers()))
         response.raise_for_status()
         return response.json()
@@ -384,7 +384,7 @@ class AccountSession:
         等业务失败走 HTTP 400，需要调用方读取 msg 判定，故这里把结果结构化返回。
         """
         headers = self.cm.get_headers()
-        url = f"{BACKEND}{path}"
+        url = f"{self.cm.api_base()}{path}"
         try:
             with self.http_client(timeout=15) as c:
                 if method.upper() == "GET":
@@ -757,7 +757,7 @@ class AccountSession:
         headers["Content-Type"] = "application/json"
         try:
             with self.http_client(timeout=httpx.Timeout(10, connect=5)) as c:
-                with c.stream("POST", f"{BACKEND}/v2/chat/completions",
+                with c.stream("POST", f"{self.cm.api_base()}/v2/chat/completions",
                               headers=headers, json=body) as r:
                     status = r.status_code
                     # 读完（或读到足够判断的量）后关闭，避免连接悬挂
@@ -934,7 +934,7 @@ class AccountSession:
 
     def _chat_json(self, path: str, body: dict | None = None) -> dict:
         """向 chat 域发请求并返回 data 段；失败返回 {}。"""
-        url = BACKEND.rstrip("/") + path
+        url = self.cm.api_base().rstrip("/") + path
         try:
             with self.http_client(timeout=25) as c:
                 if body is None:
@@ -1181,7 +1181,7 @@ class AccountSession:
             m = dict(e)
             m.update(fp)
             arr.append(m)
-        url = BACKEND.rstrip("/") + "/v2/report"
+        url = self.cm.api_base().rstrip("/") + "/v2/report"
         try:
             with self.http_client(timeout=25) as c:
                 r = c.post(url, headers=self._desktop_headers(), json=arr)

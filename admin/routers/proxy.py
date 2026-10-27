@@ -2108,6 +2108,12 @@ def _key_allowed_models(db: Session, key) -> set[str] | None:
     allowed = _key_group_models(db, key)
     aid = getattr(key, "account_id", None)
     if not aid:
+        # 单 Key 独占多账号：主绑定可能为空，取关联表里的第一个绑定账号。
+        from admin.models import ApiKeyAccount
+        row = db.query(ApiKeyAccount).filter(
+            ApiKeyAccount.key_id == key.id).order_by(ApiKeyAccount.id).first()
+        aid = row.account_id if row else None
+    if not aid:
         return allowed
     acc = scope_accounts(db.query(Account), aid, key.id).first()
     if acc is None or acc.status != "active":
@@ -2570,7 +2576,7 @@ async def chat_completions(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                key_id=key.id)
                         if not acc_i:
                             break
                         tried_accounts += 1
@@ -2595,7 +2601,8 @@ async def chat_completions(
                             extra["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                         headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra)
                         try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
+                            async with client.stream("POST", url_i, headers=headers_i, json=body) as r:
                                 if r.status_code >= 400:
                                     detail = await r.aread()
                                     text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
@@ -3046,7 +3053,7 @@ async def responses_proxy(
                         break
                     acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                             model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                key_id=key.id)
                     if not acc_i:
                         break
                     if not POOL.acquire_account(acc_i):
@@ -3074,7 +3081,8 @@ async def responses_proxy(
                                      ("OK(" + str(len(_dt)) + "ch)") if _dt else "MISSING",
                                      _ua, len(json.dumps(body, ensure_ascii=False)))
                         async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
-                            r = await client.post(url, headers=headers_i, json=body)
+                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
+                            r = await client.post(url_i, headers=headers_i, json=body)
                             if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
                                 _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
                                 if "11148" in r.text or "tool calls and tool results" in r.text:
@@ -3216,7 +3224,7 @@ async def responses_proxy(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                key_id=key.id)
                         if not acc_i:
                             break
                         if not POOL.acquire_account(acc_i):
@@ -3241,7 +3249,8 @@ async def responses_proxy(
                         pending_events = []
                         converter = ResponsesStreamConverter(model=model_name)
                         try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
+                            async with client.stream("POST", url_i, headers=headers_i, json=body) as r:
                                 if r.status_code >= 400:
                                     detail = await r.aread()
                                     text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
@@ -3520,7 +3529,7 @@ async def anthropic_messages(
                         break
                     acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                             model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                key_id=key.id)
                     if not acc_i:
                         break
                     if not POOL.acquire_account(acc_i):
@@ -3548,7 +3557,8 @@ async def anthropic_messages(
                                      ("OK(" + str(len(_dt)) + "ch)") if _dt else "MISSING",
                                      _ua, len(json.dumps(body, ensure_ascii=False)))
                         async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
-                            r = await client.post(url, headers=headers_i, json=body)
+                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
+                            r = await client.post(url_i, headers=headers_i, json=body)
                             if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
                                 _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
                                 if "11148" in r.text or "tool calls and tool results" in r.text:
@@ -3692,7 +3702,7 @@ async def anthropic_messages(
                             break
                         acc_i = await _select_account_with_wait(db2, exclude_ids=tried_ids, min_balance=1,
                                                 model=m, sticky_key=sticky_key,
-                                                account_id=getattr(key, "account_id", None), key_id=key.id)
+                                                key_id=key.id)
                         if not acc_i:
                             break
                         if not POOL.acquire_account(acc_i):
@@ -3728,7 +3738,8 @@ async def anthropic_messages(
                         pending_events = []
                         conv = AnthropicStreamConverter(model=model_name)
                         try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
+                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
+                            async with client.stream("POST", url_i, headers=headers_i, json=body) as r:
                                 if r.status_code >= 400:
                                     detail = await r.aread()
                                     text = detail[:65536].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:65536]
@@ -3984,10 +3995,10 @@ def models(
             from admin.model_listing import format_entries, display_options
             data = format_entries(data, options=display_options(db))
             return {'object': 'list', 'data': data, 'source': 'local'}
-    acc = _select_account(db, account_id=aid, key_id=key.id, min_balance=0)
+    acc = _select_account(db, key_id=key.id, min_balance=0)
     if not acc:
         return JSONResponse(status_code=503, headers={"Retry-After": "3"},
-                            content={"error": {"message": f"无可用账号：{_no_account_reason(db, aid, key.id)}",
+                            content={"error": {"message": f"无可用账号：{_no_account_reason(db, None, key.id)}",
                                                "type": "server_error", "code": "service_unavailable"}})
     # 换号重试 + 错误处置，与对话端点同口径。
     #
@@ -4057,8 +4068,8 @@ def models(
             # 换一个号再试（排除已失败的）。
             # 第二次放宽 min_balance：模型列表不消耗积分，
             # 余额为 0 的号也能正常列模型，不该因此被排除。
-            acc = (_select_account(db, exclude_ids=tried_ids, account_id=aid, key_id=key.id)
-                   or _select_account(db, exclude_ids=tried_ids, min_balance=0, account_id=aid, key_id=key.id))
+            acc = (_select_account(db, exclude_ids=tried_ids, key_id=key.id)
+                   or _select_account(db, exclude_ids=tried_ids, min_balance=0, key_id=key.id))
     return JSONResponse(status_code=502, content={
         "error": {"message": f"获取模型失败（已尝试 {len(tried_ids)} 个账号）：{last_err[:200]}",
                   "type": "upstream"}})

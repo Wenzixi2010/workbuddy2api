@@ -389,7 +389,23 @@ async def _speed_test_run(body, request, db):
     from admin.pool import POOL
     if POOL.waf.active():
         raise HTTPException(503, "出口保护中，稍后检测", headers={"Retry-After": str(max(1, POOL.waf.remaining()))})
-    acc = await _blocking_call(_select_account, db, model=model, mark_picked=False)
+    # 模型检测可指定 API Key：给定 key_id 时在该 Key 的绑定集合（独占账号）
+    # 内选号；Key 未绑定任何账号则回退公共池（与网关选号语义一致）。
+    probe_key_id = 0
+    key_id = body.get("key_id")
+    if key_id not in (None, 0, "", "0"):
+        from admin.models import ApiKey
+        try:
+            probe_key_id = int(key_id)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "key_id 必须是正整数") from None
+        key_row = db.query(ApiKey).filter(ApiKey.id == probe_key_id).first()
+        if key_row is None:
+            raise HTTPException(400, f"API Key #{probe_key_id} 不存在")
+        if key_row.status != "active":
+            raise HTTPException(400, f"API Key #{probe_key_id} 已停用，无法用于检测")
+    acc = await _blocking_call(_select_account, db, model=model, mark_picked=False,
+                               key_id=probe_key_id or None)
     if not acc or not POOL.acquire(acc.uid or ""):
         raise HTTPException(503, "当前没有可检测账号（冷却或正在使用），稍后重试", headers={"Retry-After": "3"})
     from admin import upstream_http
@@ -402,7 +418,7 @@ async def _speed_test_run(body, request, db):
             sess.close()
         POOL.release(acc.uid or "")
         raise
-    url = f"{settings.BACKEND}/v2/chat/completions"
+    url = f"{sess.cm.api_base()}/v2/chat/completions"
     payload = {
         "model": model,
         "messages": messages,
@@ -430,7 +446,7 @@ async def _speed_test_run(body, request, db):
             acc.auth_json = sess.updated_json()  # 写回可能刷新的 token
             from admin.models import UsageLog
             usage = _parse_usage('\n'.join(raw_lines)) if completed else {}
-            db.add(UsageLog(account_id=acc.id, model=model, api_key_id=0, use_case="model-probe",
+            db.add(UsageLog(account_id=acc.id, model=model, api_key_id=probe_key_id, use_case="model-probe",
                             error_kind="success" if completed else failure_kind,
                             ttfb_ms=round(ttft * 1000) if ttft is not None else None,
                             latency_ms=round((time.perf_counter() - t0) * 1000),

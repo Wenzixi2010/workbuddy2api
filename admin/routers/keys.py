@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from admin.account_binding import validate_binding
+from admin.account_binding import validate_binding, validate_binding_multi, sync_key_bindings
 from admin.db import get_db
-from admin.models import Account, ApiKey, ModelGroup
+from admin.models import Account, ApiKey, ApiKeyAccount, ModelGroup
 from admin.security import hash_key, require_admin
 
 router = APIRouter(prefix="/api/keys", tags=["keys"])
@@ -21,7 +21,9 @@ class KeyIn(BaseModel):
     unlimited: bool | None = None
     note: str = ""
     group_id: int = 0  # 0 = 不绑定分组（可用全部启用模型）
-    account_id: int | None = None  # 0 / NULL = 公共池
+    account_id: int | None = None  # 0 / NULL = 公共池（单账号主绑定，兼容老客户端）
+    # 单 Key 独占多账号：完整绑定集合（含主绑定）。缺省 = 只用 account_id。
+    account_ids: list[int] | None = None
     # 该 Key 并发上限：None=跟随全局；0=不限；N=最多 N 路在途
     max_concurrent: int | None = None
     rate_per_minute: int | None = None
@@ -53,6 +55,9 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.query(ApiKey).order_by(ApiKey.id.desc()).all()
     group_names = {g.id: g.name for g in db.query(ModelGroup).all()}
     account_names = {a.id: a.name or a.uid for a in db.query(Account).all()}
+    multi = {}
+    for m in db.query(ApiKeyAccount).order_by(ApiKeyAccount.id).all():
+        multi.setdefault(m.key_id, []).append(int(m.account_id))
     items = [
         {
             "id": k.id,
@@ -70,6 +75,12 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
             "group_name": group_names.get(int(k.group_id or 0), ""),
             "account_id": k.account_id,
             "account_name": account_names.get(k.account_id, ""),
+            # 单 Key 独占多账号：完整绑定集合（主绑定在前）+ 可读名称列表
+            "account_ids": ([int(k.account_id)] if k.account_id else [])
+                           + [aid for aid in multi.get(k.id, []) if aid != k.account_id],
+            "account_names": [account_names.get(aid, f"#{aid}")
+                              for aid in ([int(k.account_id)] if k.account_id else [])
+                              + [aid for aid in multi.get(k.id, []) if aid != k.account_id]],
             "created_at": k.created_at.isoformat() if k.created_at else None,
         }
         for k in rows
@@ -100,7 +111,10 @@ def _validate_group(db: Session, group_id: int) -> int:
 def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
     raw = _gen_key()
     gid = _validate_group(db, body.group_id)
-    aid = validate_binding(db, body.account_id)
+    # 单 Key 独占多账号：优先用 account_ids（完整集合）；缺省退回单账号 account_id。
+    account_ids = body.account_ids if body.account_ids is not None else (
+        [body.account_id] if body.account_id else [])
+    ids = validate_binding_multi(db, account_ids)
     k = ApiKey(
         name=body.name or "未命名",
         key_hash=hash_key(raw),
@@ -112,11 +126,14 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         rate_per_minute=_normalize_max_concurrent(body.rate_per_minute),
         note=body.note,
         group_id=gid,
-        account_id=aid,
+        account_id=ids[0] if ids else None,
     )
     db.add(k)
     _commit_key(db)
     db.refresh(k)
+    if len(ids) > 1:
+        from admin.account_binding import sync_key_bindings
+        sync_key_bindings(db, k.id, ids)
     # 明文 key 仅此返回一次
     return {
         "id": k.id,
@@ -129,6 +146,7 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         "rate_per_minute": k.rate_per_minute,
         "group_id": int(k.group_id or 0),
         "account_id": k.account_id,
+        "account_ids": ids,
     }
 
 
@@ -175,8 +193,13 @@ def patch_key(key_id: int, body: dict, _: bool = Depends(require_admin), db: Ses
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
-    if "account_id" in body:
-        k.account_id = validate_binding(db, body["account_id"], key_id)
+    if "account_ids" in body or "account_id" in body:
+        # 单 Key 独占多账号：account_ids（完整集合）优先；缺省退回单账号语义。
+        if "account_ids" in body and body["account_ids"] is not None:
+            sync_key_bindings(db, key_id, body["account_ids"])
+            db.refresh(k)
+        else:
+            k.account_id = validate_binding(db, body["account_id"], key_id)
     if "name" in body:
         k.name = body["name"]
     if "credit_limit" in body:
