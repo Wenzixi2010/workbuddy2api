@@ -534,11 +534,21 @@ async def _speed_test_run(body, request, db):
         with anyio.CancelScope(shield=True):
             try:
                 await _blocking_call(_persist)
-            finally:
+            except Exception:
+                pass
+            try:
                 sess.close()
+            except Exception:
+                pass
+            try:
                 POOL.release(acc.uid or "")
-        from admin.post_login import enqueue_resources
-        enqueue_resources(acc.id)
+            except Exception:
+                pass
+        try:
+            from admin.post_login import enqueue_resources
+            enqueue_resources(acc.id)
+        except Exception:
+            pass
 
     total_dur = t_end - t0
     gen_dur = (total_dur - ttft) if ttft is not None else total_dur

@@ -1586,8 +1586,31 @@ function uiSelectToggle(id, ev) {
   if (!el) return;
   const wasOpen = el.classList.contains("open");
   // 同时只开一个，避免面板互相重叠
-  document.querySelectorAll(".ui-select.open").forEach(x => { if (x.id !== id) x.classList.remove("open"); });
+  document.querySelectorAll(".ui-select.open").forEach(x => { if (x.id !== id) { x.classList.remove("open"); _uiSelectFixClip(x, false); } });
   el.classList.toggle("open", !wasOpen);
+  _uiSelectFixClip(el, !wasOpen);
+}
+
+/* 下拉面板被 overflow 容器（如弹窗 modalBox 的 overflow-y-auto）裁剪时，
+   临时让最近的可滚动祖先放行溢出，保证面板完整显示；关闭时恢复。 */
+function _uiSelectFixClip(el, opening) {
+  const key = "__uiClipAncestor__";
+  if (!opening) {
+    const anc = el[key];
+    if (anc) { anc.style.overflowY = anc.dataset.uiPrevOverflowY || ""; delete anc.dataset.uiPrevOverflowY; delete el[key]; }
+    return;
+  }
+  let anc = el.parentElement;
+  while (anc && anc !== document.body) {
+    const oy = getComputedStyle(anc).overflowY;
+    if (oy === "auto" || oy === "scroll" || oy === "hidden") {
+      el[key] = anc;
+      anc.dataset.uiPrevOverflowY = anc.style.overflowY;
+      anc.style.overflowY = "visible";
+      return;
+    }
+    anc = anc.parentElement;
+  }
 }
 
 function uiSelectPick(id, value, ev, notify = true) {
@@ -1608,6 +1631,7 @@ function uiSelectPick(id, value, ev, notify = true) {
     if (!on && old) old.remove();
   });
   el.classList.remove("open");
+  _uiSelectFixClip(el, false);
   if (notify && st.onChange) st.onChange(value, o);
 }
 
@@ -4912,8 +4936,8 @@ async function speedTestModel(modelId, btn){
   if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
   try{
     const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId, key_id: Number(uiSelectValue("mtKey")||0)})});
-    const d = await r.json();
-    if(!r.ok){ toast(`测速失败(${modelId}): ${esc(d.detail||"")}`,"err"); return; }
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){ toast(`测速失败(${modelId}): ${esc(d.detail|| (d.message||"") || `HTTP ${r.status}`)}`,"err"); return; }
     _modelProbes[modelId] = d;
     await loadModelHealth();
     const ttft = d.ttft_ms!=null ? d.ttft_ms+"ms" : "—";
@@ -6909,7 +6933,7 @@ async function loadUsageStats() {
 
 // 点击空白处收起所有下拉
 document.addEventListener("click", () => {
-  document.querySelectorAll(".ui-select.open").forEach(x => x.classList.remove("open"));
+  document.querySelectorAll(".ui-select.open").forEach(x => { x.classList.remove("open"); _uiSelectFixClip(x, false); });
 });
 
 
