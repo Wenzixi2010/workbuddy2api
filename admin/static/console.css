@@ -434,7 +434,9 @@ button:focus-visible, summary:focus-visible { outline:2px solid var(--brand-ink)
 }
 
 /* ── 登录页（对齐 panel 项目的登录卡片样式） ─────────────── */
-.login-wrap {
+/* .hidden（Tailwind display:none）必须能盖住它 —— 本文件在 Tailwind 之后加载，
+   同特异性下后者胜出，登录成功后 #login 加 .hidden 会藏不掉。用 :not(.hidden) 收窄。 */
+.login-wrap:not(.hidden) {
   min-height: 100vh;
   display: flex;
   align-items: center;
