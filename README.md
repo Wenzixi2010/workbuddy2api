@@ -165,7 +165,7 @@ workbuddy2api/
 
 ## Windows 与 Android
 
-从 [GitHub Releases](https://github.com/xiaofan6ya/workbuddy2api/releases) 下载对应平台安装包及 SHA256 校验文件。
+从 [GitHub Releases](https://github.com/Wenzixi2010/workbuddy2api/releases) 下载对应平台安装包及 SHA256 校验文件。
 
 | 平台 | 使用方式 | 详细说明 |
 | --- | --- | --- |
@@ -185,7 +185,7 @@ Android 后台稳定运行需要允许通知、后台运行及取消电池优化
 安装 Docker Engine 和 Compose 插件后执行：
 
 ```bash
-git clone https://github.com/xiaofan6ya/workbuddy2api.git
+git clone https://github.com/Wenzixi2010/workbuddy2api.git
 cd workbuddy2api
 umask 077
 printf 'ADMIN_USERNAME=admin\nADMIN_PASSWORD=%s\nADMIN_JWT_SECRET=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)" > .env.docker
@@ -242,7 +242,7 @@ JDK、Android SDK 和 Gradle 只在构建 APK 时需要，版本和安装路径�
 先克隆仓库并进入项目目录，再创建虚拟环境：
 
 ```bash
-git clone https://github.com/xiaofan6ya/workbuddy2api.git
+git clone https://github.com/Wenzixi2010/workbuddy2api.git
 cd workbuddy2api
 python -m venv .venv
 # Linux/macOS
@@ -598,6 +598,15 @@ CC Switch 中对应填写 Anthropic 服务地址、后台 API Key 和模型。�
 - [账号调度、出口风险与维护任务加固](docs/2api-increment-risk-scheduling.md)
 - [EXE / APK 构建与发布](BUILD.md)：根目录 `build.bat` 可统一构建两端
 - [通用工具脚本](scripts/README.md)：守护进程、凭证配置与 ASAR 工具
+- [1.12.0 更新公告](docs/RELEASE_NOTES_1.12.0.md)
+- [1.11.1 更新公告](docs/RELEASE_NOTES_1.11.1.md)
+- [1.11.0 更新公告](docs/RELEASE_NOTES_1.11.0.md)
+- [1.10.0 更新公告](docs/RELEASE_NOTES_1.10.0.md)
+- [1.0.9 更新公告](docs/RELEASE_NOTES_1.0.9.md)
+- [1.0.8 更新公告](docs/RELEASE_NOTES_1.0.8.md)
+- [1.0.7 更新公告](docs/RELEASE_NOTES_1.0.7.md)
+- [1.0.6 更新公告](docs/RELEASE_NOTES_1.0.6.md)
+- [1.0.5 更新公告](docs/RELEASE_NOTES_1.0.5.md)
 - [1.0.4 更新公告](docs/RELEASE_NOTES_1.0.4.md)
 - [1.0.3 更新公告](docs/RELEASE_NOTES_1.0.3.md)
 - [1.0.2 更新公告](docs/RELEASE_NOTES_1.0.2.md)
