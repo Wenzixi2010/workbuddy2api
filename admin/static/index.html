@@ -4909,33 +4909,33 @@ async function enableAllModels(enabled){
 }
 let _modelBatchBusy = false;
 async function openModelTest(modelId, btn){
-  /* 模型检测弹窗：可选指定 API Key（用该 Key 的独占账号池检测）。 */
-  let keyOptions = [{ value: "0", label: "公共账号池（默认，自动选号）" }];
+  /* 模型检测弹窗：可选指定账号（用该账号直接检测），默认公共账号池自动选号。 */
+  let accOptions = [{ value: "0", label: "公共账号池（默认，自动选号）" }];
   try {
-    const r = await api("/api/keys");
+    const r = await api("/api/accounts");
     const { ok, data } = await safeJson(r);
-    if (ok) keyOptions = keyOptions.concat((data.items || [])
-      .filter(k => k.status === "active")
-      .map(k => ({ value: String(k.id), label: `${k.name || "未命名"} #${k.id}${(k.account_ids||[]).length ? ` · 独占 ${k.account_ids.length} 个账号` : " · 公共池"}` })));
-  } catch (e) { /* Key 列表拉取失败不阻塞，仍可用公共池检测 */ }
+    if (ok) accOptions = accOptions.concat((data.items || [])
+      .filter(a => a.status === "active")
+      .map(a => ({ value: String(a.id), label: `${a.name || a.uid || "账号"} #${a.id} · ${a.balance_remain} 积分` })));
+  } catch (e) { /* 账号列表拉取失败不阻塞，仍可用公共池检测 */ }
   window._modelTestModel = modelId;
-  window._mtKeyValue = "0";
+  window._mtAccValue = "0";
   openModal(`
     <h3 class="font-bold mb-3"><i class="fa-solid fa-gauge-high mr-1"></i> 模型检测 — ${esc(modelId)}</h3>
-    <label class="block text-xs text-slate-500 mb-1">使用的 API Key（可选）</label>
-    <div id="mtKeyList" class="border rounded-lg max-h-64 overflow-auto p-2 grid gap-1"></div>
-    <p class="text-[11px] text-slate-400 mt-2 mb-3">指定 Key 后，检测请求使用该 Key 独占绑定的账号；未绑定则回退公共池。用量会计入该 Key。</p>
+    <label class="block text-xs text-slate-500 mb-1">使用的账号（可选）</label>
+    <div id="mtAccList" class="border rounded-lg max-h-64 overflow-auto p-2 grid gap-1"></div>
+    <p class="text-[11px] text-slate-400 mt-2 mb-3">指定账号后，检测请求直接用该账号发起；默认使用公共账号池自动选号。</p>
     <div class="flex justify-end gap-2 mt-2">
       <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
       <button id="mtRunBtn" onclick="speedTestModel(window._modelTestModel, this)" class="px-3 py-1.5 rounded-lg btn-primary">开始检测</button>
     </div>`);
-  const box = $("#mtKeyList");
-  if (box) box.innerHTML = keyOptions.map(o => `
+  const box = $("#mtAccList");
+  if (box) box.innerHTML = accOptions.map(o => `
     <label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-slate-50 cursor-pointer text-sm">
-      <input type="radio" name="mtKeyRadio" value="${esc(o.value)}" ${o.value === "0" ? "checked" : ""}
-             onchange="window._mtKeyValue = this.value" />
+      <input type="radio" name="mtAccRadio" value="${esc(o.value)}" ${o.value === "0" ? "checked" : ""}
+             onchange="window._mtAccValue = this.value" />
       <span class="truncate">${esc(o.label)}</span>
-    </label>`).join("") || '<div class="text-xs text-slate-400 p-2">无可选项</div>';
+    </label>`).join("") || '<div class="text-xs text-slate-400 p-2">无可选账号</div>';
 }
 async function speedTestModel(modelId, btn){
   if(_modelProbeBusy || (btn && btn.disabled)) return;
@@ -4943,7 +4943,7 @@ async function speedTestModel(modelId, btn){
   const old = btn ? btn.innerHTML : "";
   if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
   try{
-    const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId, key_id: Number(window._mtKeyValue||0)})});
+    const r = await api("/api/models/speed-test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:modelId, account_id: Number(window._mtAccValue||0)})});
     const d = await r.json().catch(()=>({}));
     if(!r.ok){ toast(`测速失败(${modelId}): ${esc(d.detail|| (d.message||"") || `HTTP ${r.status}`)}`,"err"); return; }
     _modelProbes[modelId] = d;
@@ -4952,7 +4952,7 @@ async function speedTestModel(modelId, btn){
     const sp = d.speed_tps!=null ? d.speed_tps+" t/s" : "—";
     const comp = d.completion_tokens!=null ? d.completion_tokens : (d.total_tokens??0);
     const prompt = d.prompt_tokens!=null ? d.prompt_tokens : "—";
-    toast(`<b>${esc(modelId)}</b> 测速：首字 ${ttft} · 提示 ${prompt} / 补全 ${comp} tok · ${sp}` + (d.account?` · 账号 ${esc(d.account)}`:""), "ok");
+    toast(`${modelId} 测速：首字 ${ttft} · 提示 ${prompt} / 补全 ${comp} tok · ${sp}` + (d.account?` · 账号 ${d.account}`:""), "ok");
     closeModal();
   }catch(e){ toast("测速异常: "+e.message,"err"); }
   finally{ _modelProbeBusy = false; if(btn){ btn.disabled=false; btn.innerHTML = old; } }
