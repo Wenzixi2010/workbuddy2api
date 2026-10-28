@@ -1865,6 +1865,59 @@ def _looks_login_dead(acc: Account, now: datetime) -> bool:
     return any(m in msg for m in _LOGIN_DEAD_MARKERS)
 
 
+def _account_backend(auth_json: str) -> str:
+    """该凭证真正要打的上游基址，用作模型目录的缓存分区键。
+
+    `model_catalog.get_models` 用 (backend_url, 凭证哈希) 做缓存键，而国际版
+    账号实际请求的是 `https://{domain}`（见 `CredentialManager.api_base()`）。
+    一律传 `settings.BACKEND` 会让国际版和国内版的目录落进同一分区语义里 ——
+    现在两版并存，必须用真实基址，否则缓存会把两个版本的目录混为一谈。
+    """
+    try:
+        return backend.CredentialManager.from_json(auth_json).api_base()
+    except Exception:
+        return settings.BACKEND
+
+
+def _prefer_model_region(db: Session, rows: list, model: str) -> list:
+    """把候选账号收窄到「确实持有该模型」的版本分区。
+
+    国内版与国际版的模型目录不同，跨版本请求上游会报模型不存在，
+    然后被计成一次失败、连着冷却账号 —— 表现为「用国际版模型时好时坏」。
+    所以选号阶段就该按模型所在的版本挑账号，而不是挑中谁算谁。
+
+    **保守降级**：拿不到任何版本信息（账号凭证读不出 domain、上游目录取不到、
+    或该模型在两个版本都存在）时原样返回候选列表 —— 宁可让上游报错并触发
+    换号重试，也不要因为探测失败把一个本来能用的号池清空。
+    """
+    try:
+        regions = {model_catalog.account_region(a.auth_json) for a in rows}
+        if len(regions) < 2:
+            # 候选全在同一个版本，无需判断。
+            return rows
+        holders: set[str] = set()
+        for acc in rows[:8]:  # 每个版本取一个代表足够，按候选顺序前 8 个覆盖两端
+            region = model_catalog.account_region(acc.auth_json)
+            if region in holders:
+                continue
+            try:
+                def fetch(a=acc):
+                    with backend.AccountSession(a.auth_json) as sess:
+                        return sess.fetch_models()
+                ids = {m.get("id") for m in
+                       model_catalog.get_models(acc.auth_json, _account_backend(acc.auth_json), fetch) or []}
+            except Exception:
+                return rows
+            if model in ids:
+                holders.add(region)
+        if not holders:
+            return rows
+        picked = [a for a in rows if model_catalog.account_region(a.auth_json) in holders]
+        return picked or rows
+    except Exception:
+        return rows
+
+
 def _select_account(db: Session, exclude_ids: set | None = None,
                     min_balance: int = 1, mark_picked: bool = True,
                     model: str = "", sticky_key: str = "",
@@ -1957,6 +2010,9 @@ def _select_account(db: Session, exclude_ids: set | None = None,
                       .filter(AccountModelCooldown.model == model,
                               AccountModelCooldown.until > now).all()}
         rows = [a for a in rows if a.id not in cooled_ids]
+        if not rows:
+            return None
+        rows = _prefer_model_region(db, rows, model)
         if not rows:
             return None
 
@@ -2105,36 +2161,52 @@ def _model_out_of_group_error(model: str) -> JSONResponse:
 
 
 def _key_allowed_models(db: Session, key) -> set[str] | None:
+    """本 Key 可用的模型集合。
+
+    独占多账号时必须取**并集**：一个 Key 可以同时独占国内版和国际版账号，
+    而两个版本的模型目录不同（国际版专有模型不挂在 CN 域下）。原实现只拿
+    「第一个绑定账号」算权益，于是当第一个是国际版账号时，国内版模型全部
+    被判为无权使用 —— 表现就是「同时独占国际版和国内版时提示 key 无效」。
+    """
     allowed = _key_group_models(db, key)
-    aid = getattr(key, "account_id", None)
-    if not aid:
-        # 单 Key 独占多账号：主绑定可能为空，取关联表里的第一个绑定账号。
-        from admin.models import ApiKeyAccount
-        row = db.query(ApiKeyAccount).filter(
-            ApiKeyAccount.key_id == key.id).order_by(ApiKeyAccount.id).first()
-        aid = row.account_id if row else None
-    if not aid:
+    from admin.account_binding import _bound_account_ids
+    bound_ids = _bound_account_ids(db, key.id)
+    if not bound_ids:
         return allowed
-    acc = scope_accounts(db.query(Account), aid, key.id).first()
-    if acc is None or acc.status != "active":
+    accounts = [acc for acc in scope_accounts(
+        db.query(Account), None, key.id).filter(Account.id.in_(bound_ids)).all()
+        if acc.status == "active"]
+    if not accounts:
         raise HTTPException(503, {"error": {"message": "绑定账号不存在或已禁用，该 Key 无法使用公共池",
                                            "type": "bound_account_unavailable"}})
-    try:
-        def fetch():
-            with backend.AccountSession(acc.auth_json) as sess:
-                rows = sess.fetch_models()
-                acc.auth_json = sess.updated_json()
-            db.commit()
-            return rows
-        rows = model_catalog.get_models(acc.auth_json, settings.BACKEND, fetch)
-    except Exception:
-        db.rollback()
+    # 同一版本内多个账号权益相同，按版本去重后各拉一次即可，避免 N 倍上游往返。
+    picked: dict[str, Account] = {}
+    for acc in accounts:
+        picked.setdefault(model_catalog.account_region(acc.auth_json), acc)
+    entitled: set[str] = set()
+    configs = db.query(ModelConfig).all()
+    enabled_ids = {c.model_id for c in configs if c.enabled} if configs else None
+    failures = []
+    for region, acc in picked.items():
+        try:
+            def fetch():
+                with backend.AccountSession(acc.auth_json) as sess:
+                    rows = sess.fetch_models()
+                    acc.auth_json = sess.updated_json()
+                db.commit()
+                return rows
+            rows = model_catalog.get_models(acc.auth_json, _account_backend(acc.auth_json), fetch)
+        except Exception as error:
+            db.rollback()
+            failures.append(error)
+            continue
+        ids = {m["id"] for m in rows or [] if m.get("id") and m["id"].lower() != "auto"}
+        if enabled_ids is not None:
+            ids &= enabled_ids
+        entitled |= ids
+    if not entitled and failures:
         raise HTTPException(503, {"error": {"message": "无法获取绑定账号的模型权益，请稍后重试",
                                            "type": "bound_account_unavailable"}}) from None
-    entitled = {m["id"] for m in rows or [] if m.get("id") and m["id"].lower() != "auto"}
-    configs = db.query(ModelConfig).all()
-    if configs:
-        entitled &= {c.model_id for c in configs if c.enabled}
     return entitled if allowed is None else entitled & allowed
 
 
@@ -2192,7 +2264,7 @@ def _pick_best_model(db: Session, requested_model: str,
                 def fetch():
                     with backend.AccountSession(acc_tmp.auth_json) as sess:
                         return sess.fetch_models()
-                selected = model_catalog.auto_model(acc_tmp.auth_json, settings.BACKEND, fetch)
+                selected = model_catalog.auto_model(acc_tmp.auth_json, _account_backend(acc_tmp.auth_json), fetch)
                 if selected:
                     return selected
         except Exception:
@@ -2510,7 +2582,6 @@ async def chat_completions(
     opts["include_usage"] = True
     body["stream_options"] = opts
 
-    url = f"{settings.BACKEND}/v2/chat/completions"
 
     # 会话粘性键与会话头族在**轮转循环外**算一次，循环内所有尝试复用同一份：
     # 换号重试若换了会话 ID，上游看到的是 N 个并发会话而不是一次对话的一次重试。
@@ -3015,7 +3086,6 @@ async def responses_proxy(
 
     client_wants_stream = bool(payload.get("stream", True))
     model_name = payload.get("model", "auto")
-    url = f"{settings.BACKEND}/v2/chat/completions"
 
     # 会话粘性键与会话头族：在轮转循环外算一次，循环内所有尝试复用同一份
     # （换号重试若换了会话 ID，上游看到的是 N 个并发会话而非一次对话的一次重试）。
@@ -3077,11 +3147,11 @@ async def responses_proxy(
                         _dt = headers_i.get("X-Device-Token", "")
                         _ua = headers_i.get("User-Agent", "")[:80]
                         _logger.info("[forward] POST %s | acc=%s | X-Device-Token=%s | UA=%s | body_len=%d",
-                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     url_i, acc_i.uid[:12] if acc_i.uid else "?",
                                      ("OK(" + str(len(_dt)) + "ch)") if _dt else "MISSING",
                                      _ua, len(json.dumps(body, ensure_ascii=False)))
+                        url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                         async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
-                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                             r = await client.post(url_i, headers=headers_i, json=body)
                             if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
                                 _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
@@ -3496,7 +3566,6 @@ async def anthropic_messages(
     # Anthropic Messages API 的 stream 默认是 false
     client_wants_stream = bool(payload.get("stream", False))
     model_name = payload.get("model", "auto")
-    url = f"{settings.BACKEND}/v2/chat/completions"
 
     # 会话粘性键与会话头族：轮转循环外算一次，循环内所有尝试复用同一份。
     # 这里用**原始 payload** 而非转换后的 chat_body：Anthropic 协议的
@@ -3553,11 +3622,11 @@ async def anthropic_messages(
                         _dt = headers_i.get("X-Device-Token", "")
                         _ua = headers_i.get("User-Agent", "")[:80]
                         _logger.info("[forward] POST %s | acc=%s | X-Device-Token=%s | UA=%s | body_len=%d",
-                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     url_i, acc_i.uid[:12] if acc_i.uid else "?",
                                      ("OK(" + str(len(_dt)) + "ch)") if _dt else "MISSING",
                                      _ua, len(json.dumps(body, ensure_ascii=False)))
+                        url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                         async with upstream_http.client(request, _stream_timeout(), backend.HTTP_LIMITS, retry_budget=retry_budget) as client:
-                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                             r = await client.post(url_i, headers=headers_i, json=body)
                             if r.status_code >= 400 or (r.status_code == 200 and _looks_like_inband_error(r.text)):
                                 _logger.warning("[forward] upstream %s | body=%s", r.status_code, r.text[:400])
@@ -3722,10 +3791,11 @@ async def anthropic_messages(
                             extra_i["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
                             extra_i["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                         headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
+                        url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                         _dt = headers_i.get("X-Device-Token", "")
                         _ua = headers_i.get("User-Agent", "")[:80]
                         _logger.warning("[forward-cc-stream] POST %s | acc=%s | X-Device-Token=%s | UA=%s | body_len=%d | keys=%s",
-                                     url, acc_i.uid[:12] if acc_i.uid else "?",
+                                     url_i, acc_i.uid[:12] if acc_i.uid else "?",
                                      ("OK(" + str(len(_dt)) + "ch)") if _dt else "MISSING",
                                      _ua, len(json.dumps(body, ensure_ascii=False)),
                                      list(headers_i.keys()))
@@ -3738,7 +3808,6 @@ async def anthropic_messages(
                         pending_events = []
                         conv = AnthropicStreamConverter(model=model_name)
                         try:
-                            url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                             async with client.stream("POST", url_i, headers=headers_i, json=body) as r:
                                 if r.status_code >= 400:
                                     detail = await r.aread()
@@ -3935,6 +4004,73 @@ async def anthropic_count_tokens(
     return {"input_tokens": max(1, len(text) // 3)}
 
 
+def _merge_other_region_models(db, key, data, fetched_regions, allowed, configs,
+                               enabled_ids, maintenance, model_listing) -> list:
+    """把本 Key 还能用到、但属于其它上游版本分区的模型补进列表。
+
+    国内版与国际版是两套并存的站点，模型目录不同。`/v1/models` 原本只拿
+    选号算法挑出的**一个**账号去拉目录，于是只有该账号所在版本的模型可见 ——
+    DSH 等客户端因此看不到国际版账号的专有模型。
+
+    这里对尚未覆盖的版本分区各补拉一次（每个分区挑一个账号），把结果并进
+    同一份列表。任何一步失败都静默跳过：主分区已经成功，补拉只是增强，
+    不该让整个列表接口变成错误。
+    """
+    try:
+        from admin.account_binding import _bound_account_ids
+        bound_ids = _bound_account_ids(db, key.id) if key is not None else []
+        if bound_ids:
+            query = scope_accounts(db.query(Account), None, key.id).filter(
+                Account.id.in_(bound_ids))
+        else:
+            # 公共池：只用与首个账号同池的账号（scope_accounts 已排除他人独占的）。
+            query = scope_accounts(db.query(Account))
+        candidates = [acc for acc in query.filter(Account.status == "active").all()
+                      if acc.auth_json]
+    except Exception:
+        db.rollback()
+        return data
+    seen = {row.get("id") for row in data}
+    by_region: dict[str, Account] = {}
+    for acc in candidates:
+        region = model_catalog.account_region(acc.auth_json)
+        if region in fetched_regions or region in by_region:
+            continue
+        by_region[region] = acc
+    for region, acc in by_region.items():
+        try:
+            with backend.AccountSession(acc.auth_json) as sess:
+                try:
+                    rows = sess.fetch_models()
+                finally:
+                    acc.auth_json = sess.updated_json()
+            extra = [{
+                "id": m.get("id"), "object": "model", "owned_by": "codebuddy",
+                "name": m.get("name") or m.get("id"),
+                **model_metadata.metadata(m),
+                **model_metadata.promotion_display(m),
+                "display_name": m.get("name") or m.get("id"),
+                "base_credit_multiplier": None,
+            } for m in rows or []
+                if m.get("id") and m.get("id", "").lower() != "auto"
+                and m.get("id") not in seen
+                and (m.get("id") in allowed if allowed is not None else
+                     not configs or m.get("id") in enabled_ids)]
+            if extra:
+                with backend.AccountSession(acc.auth_json) as sess:
+                    extra = model_listing.enrich_entries(
+                        sess, extra,
+                        on_error=lambda error: maintenance.note_failure(db, acc, error),
+                        options=model_listing.display_options(db))
+                data = data + extra
+                seen |= {row.get("id") for row in extra}
+            db.commit()
+        except Exception:
+            db.rollback()
+            continue
+    return data
+
+
 @router.get("/v1/models")
 def models(
     db: Session = Depends(get_db),
@@ -4024,6 +4160,7 @@ def models(
                         # Explicit list refreshes must read current upstream prices.
                         # Automatic routing retains its separate catalog TTL cache.
                         models_raw = sess.fetch_models()
+                        fetched_regions = {model_catalog.account_region(acc.auth_json)}
                         data = [{
                             "id": m.get("id"), "object": "model", "owned_by": "codebuddy",
                             "name": m.get("name") or m.get("id"),
@@ -4047,6 +4184,8 @@ def models(
             # 报 "'Session' object has no attribute 'breaker_fails'"，而且因为
             # 在 try 里会被当成「取模型失败」→ 502，很难一眼看出是参数顺序问题。
             db.commit()
+            data = _merge_other_region_models(
+                db, key, data, fetched_regions, allowed, configs, enabled_ids, maintenance, model_listing)
             return {"object": "list", "data": data, "source": "backend"}
         except Exception as e:
             last_err = str(e)

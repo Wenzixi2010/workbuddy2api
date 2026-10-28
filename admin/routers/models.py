@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from admin import backend
+from admin import backend, model_catalog
 from admin.account_binding import scope_accounts
 from admin.config import settings
 from admin.db import get_db
@@ -183,6 +183,17 @@ def _do_sync_models(db: Session, account_id: int | None = None) -> dict:
 
 
 def _fetch_catalog(db, account_id=None):
+    """拉取上游模型目录。
+
+    ⚠️ 必须**按版本分区各拉一次**，不能只取一个账号就收工。
+
+    国内版与国际版是两套并存的站点，模型目录不同（见 `converter.INTL_DOMAINS`
+    与 `CredentialManager.api_base()`）。原实现按 `balance_remain.desc()` 排序后
+    取第一个拉通的账号就 break，于是余额高的国内版账号永远抢先 —— 国际版账号
+    的模型永远进不了本地模型表，表现为「添加国际版账号后同步不到国际版模型」。
+
+    现在每个版本分区各取一个账号、各拉一次，把结果合并后返回。
+    """
     query = db.query(Account).filter(Account.status == "active")
     if account_id is not None:
         query = query.filter(Account.id == account_id)
@@ -191,38 +202,55 @@ def _fetch_catalog(db, account_id=None):
     candidates = query.order_by(Account.balance_remain.desc(), Account.id.asc()).all()
     if not candidates:
         raise HTTPException(status_code=503, detail="无可用账号（无法连接后端获取模型列表）")
-    last_error = None
-    attempts = 0
+
+    # 指定单账号时就是它自己的分区；否则按版本分组，每组挑余额最高的那个。
+    groups: dict[str, list] = {}
     for acc in candidates:
-        try:
-            from admin import maintenance
-            with maintenance.account_slot(acc, db) as reason:
-                if reason:
-                    continue
-                attempts += 1
-                original = acc.auth_json
-                with backend.AccountSession(original) as sess:
-                    try:
-                        models_raw = sess.fetch_models()
-                    finally:
-                        updated_auth = sess.updated_json()
-                        db.query(Account).filter(Account.id == acc.id, Account.auth_json == original).update(
-                            {Account.auth_json: updated_auth}, synchronize_session=False)
-                        db.commit()
-                break
-        except Exception as error:
-            db.rollback()
-            maintenance.note_failure(db, acc, error)
-            db.commit()
-            last_error = error
-            if attempts >= 3:
-                raise HTTPException(status_code=502, detail="获取模型目录失败，请稍后重试")
-    else:
+        groups.setdefault(model_catalog.account_region(acc.auth_json), []).append(acc)
+
+    merged: list = []
+    seen_ids: set[str] = set()
+    last_error = None
+    fetched_any = False
+    for region, accounts in groups.items():
+        attempts = 0
+        for acc in accounts:
+            try:
+                from admin import maintenance
+                with maintenance.account_slot(acc, db) as reason:
+                    if reason:
+                        continue
+                    attempts += 1
+                    original = acc.auth_json
+                    with backend.AccountSession(original) as sess:
+                        try:
+                            models_raw = sess.fetch_models()
+                        finally:
+                            updated_auth = sess.updated_json()
+                            db.query(Account).filter(Account.id == acc.id, Account.auth_json == original).update(
+                                {Account.auth_json: updated_auth}, synchronize_session=False)
+                            db.commit()
+                    fetched_any = True
+                    for row in models_raw or []:
+                        mid = str(row.get("id") or "")
+                        if mid and mid not in seen_ids:
+                            seen_ids.add(mid)
+                            merged.append(row)
+                    break
+            except Exception as error:
+                db.rollback()
+                maintenance.note_failure(db, acc, error)
+                db.commit()
+                last_error = error
+                if attempts >= 3:
+                    break
+
+    if not fetched_any:
         if last_error is None:
             raise HTTPException(status_code=503, detail="账号处于保护或在途占用，稍后同步模型")
         raise HTTPException(status_code=502, detail="获取模型目录失败，请稍后重试")
 
-    return models_raw
+    return merged
 
 
 def _sync_models_locked(db: Session, account_id: int | None = None) -> dict:
