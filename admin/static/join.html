@@ -5,6 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="robots" content="noindex, nofollow" />
 <title>WorkBuddy 注册</title>
+<!-- 管理接口前缀：默认 /api；服务端按 ADMIN_API_PREFIX 改写这一行。 -->
+<script>window.__API_PREFIX__="/api";</script>
+<script>
+  /* 与后台页同款：页面里继续写 /api/...，真正发请求时换到实际前缀。 */
+  window.apiUrl = function (path) {
+    var p = window.__API_PREFIX__ || "/api";
+    if (p === "/api" || typeof path !== "string" || path.indexOf("/api/") !== 0) return path;
+    return p + path.slice(4);
+  };
+  (function () {
+    if ((window.__API_PREFIX__ || "/api") === "/api") return;
+    var rawFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      if (typeof input === "string") input = window.apiUrl(input);
+      return rawFetch(input, init);
+    };
+  })();
+</script>
 <!--
   公开注册页（复刻 WorkBuddy 手机号登录）
 

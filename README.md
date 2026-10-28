@@ -201,6 +201,18 @@ docker compose --env-file .env.docker logs --tail=100 admin
 
 默认只运行 **一个 admin 容器**，包含 Web UI、多账号网关与定时任务。SQLite 保存在 `admin_data` 命名卷，限流使用进程内存，无需另装 MySQL 或 Redis。保持单 worker，使账号租约、短信出口限流与调度任务共享状态。
 
+### 自定义管理接口路径（可选）
+
+后台管理接口默认挂在 `/api` 下。如果要把面板藏到反向代理的子路径后面，部署时在 `.env.docker` 里加一行即可，**不需要改镜像**：
+
+```bash
+ADMIN_API_PREFIX=/xxx/api
+```
+
+改完后管理接口整体迁移到 `/xxx/api/*`，面板地址仍是 `/admin`（页面会按该前缀发请求），旧 `/api/*` 直接 404。留空或写 `/` 会回退默认 `/api`；含空白或 `..` 时同样回退并打警告。
+
+只影响管理接口。`/v1/*`（OpenAI / Responses / Anthropic 三套协议）、`/gw/*`、`/admin`、`/join`、`/static` 是客户端与安装包写死的对外契约，**不会**跟着变，所以已有 API Key 与客户端配置无需调整。容器健康检查会自动跟随该前缀，无需手工改 `docker-compose.yml`。
+
 Compose 中的 `converter` 是可选的单账号转换器，已放入 `standalone` profile，admin 不依赖它。只有需要独立读取宿主机 `credentials/` 凭证目录时，才配置 `CODEBUDDY2OPENAI_KEY`，并执行：
 
 ```bash
@@ -520,6 +532,7 @@ CC Switch 中对应填写 Anthropic 服务地址、后台 API Key 和模型。�
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Web 管理账号与密码，源码部署必须设置 |
 | `ADMIN_JWT_SECRET` / `ADMIN_JWT_EXPIRE_HOURS` | 管理会话签名密钥与有效期，密钥使用至少 32 字节随机值 |
 | `ADMIN_HOST` / `ADMIN_PORT` | `main.py` 监听地址与端口，默认 `0.0.0.0:8790` |
+| `ADMIN_API_PREFIX` | 管理接口路径前缀，默认 `/api`；可改为 `/xxx/api` 藏到子路径，不影响 `/v1`、`/gw` 等对外契约 |
 | `ADMIN_DATABASE_URL` | SQLAlchemy 连接串，支持 SQLite 或 MySQL；模板默认 MySQL |
 | `ADMIN_REDIS_URL` | Redis 连接地址，内存限流模式可留空 |
 | `ADMIN_GATEWAY_LIMIT_BACKEND` | `auto` / `redis` / `memory`，按部署选择 |

@@ -1,11 +1,12 @@
 """管理后台 FastAPI 入口：登录、挂载路由、托管前端静态页、启动时建库建表。"""
+import json
 import logging
 import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -105,7 +106,7 @@ async def _security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if request.url.path.startswith(("/api", "/admin")):
+    if request.url.path.startswith((getattr(settings, "API_PREFIX", "/api"), "/admin")):
         response.headers.setdefault("Cache-Control", "no-store")
     return response
 
@@ -133,30 +134,51 @@ if os.getenv("WORKBUDDY_ANDROID") == "1":
     accounts.router.routes[:] = [route for route in accounts.router.routes
                                 if getattr(route, "path", "") not in
                                 ("/api/accounts/scan-local", "/api/accounts/import-local", "/api/accounts/{acc_id}/inject")]
-app.include_router(accounts.router)
-app.include_router(keys.router)
-app.include_router(models.router)
-app.include_router(proxy.router)
-app.include_router(audio.router)
-app.include_router(sync.router)
-app.include_router(schedules.router)
-app.include_router(logs.router)
-app.include_router(groups.router)
-app.include_router(stats.router)
-app.include_router(credits.router)
-app.include_router(maintenance.router)
-app.include_router(growth.router)
-app.include_router(growth_center.router)
-app.include_router(benefits.router)
+
+# 管理接口的统一路径前缀（默认 /api，可用 ADMIN_API_PREFIX 改）。
+#
+# 各 router 里写死的是 `/api/xxx` 这样的完整前缀，这里**不改 router 定义**，
+# 而是在挂载时把 `/api` 这一段换成配置值 —— FastAPI 的 include_router(prefix=)
+# 只是把字符串拼在前面，所以 router 内部的 `/api/accounts` 能原样保留、
+# 也就不用动 17 个模块里的常量，更不会漏掉某个新加的 router。
+#
+# `_mount` 负责这件事：只替换开头那一段 `/api`，路由若不以 `/api` 开头则原样挂载。
+_API_PREFIX = getattr(settings, "API_PREFIX", "/api") or "/api"
+
+
+def _mount(router, **kwargs):
+    if _API_PREFIX != "/api":
+        for route in router.routes:
+            path = getattr(route, "path", "")
+            if isinstance(path, str) and (path == "/api" or path.startswith("/api/")):
+                route.path = _API_PREFIX + path[4:]
+    app.include_router(router, **kwargs)
+
+
+_mount(accounts.router)
+_mount(keys.router)
+_mount(models.router)
+_mount(proxy.router)
+_mount(audio.router)
+_mount(sync.router)
+_mount(schedules.router)
+_mount(logs.router)
+_mount(groups.router)
+_mount(stats.router)
+_mount(credits.router)
+_mount(maintenance.router)
+_mount(growth.router)
+_mount(growth_center.router)
+_mount(benefits.router)
 if os.getenv("WORKBUDDY_ANDROID") != "1":
     from admin.routers import app_source, client_profile
-    app.include_router(client_profile.router)
-    app.include_router(app_source.router)
-app.include_router(login_router.router)
-app.include_router(releases.router)
+    _mount(client_profile.router)
+    _mount(app_source.router)
+_mount(login_router.router)
+_mount(releases.router)
 # 自助上传页（无需后台登录态）：复刻 WorkBuddy 手机号登录页，
 # 让「发给朋友」这一诉求成立 —— 对方不需要知道后台口令。
-app.include_router(login_router.public_router)
+_mount(login_router.public_router)
 
 
 @app.on_event("startup")
@@ -328,7 +350,10 @@ def _get_stored_hash() -> str:
     return h
 
 
-@app.post("/api/login")
+# 登录端点同样跟随前缀：`/api/login` → `{ADMIN_API_PREFIX}/login`。
+# 它是应用级路由（不是某个 router 里的），所以 `_mount` 覆盖不到，
+# 这里直接按配置值注册。前端登录页也会从注入的运行时配置里读同一个前缀。
+@app.post(_API_PREFIX + "/login")
 def login(
     username: str = Form(...),
     password: str = Form(...),
@@ -368,7 +393,7 @@ class PasswordChangeIn(BaseModel):
     new_password: str
 
 
-@app.patch("/api/admin/password")
+@app.patch(_API_PREFIX + "/admin/password")
 def change_password(body: PasswordChangeIn, _: bool = Depends(require_admin)):
     if not verify_password(body.old_password, _get_stored_hash()):
         raise HTTPException(status_code=403, detail="当前密码不正确")
@@ -395,7 +420,21 @@ def index_redirect():
 @app.get("/admin")
 @app.get("/admin/")
 def admin_index():
-    return FileResponse(STATIC_DIR / "index.html")
+    """后台页面。
+
+    管理接口前缀可配（ADMIN_API_PREFIX），页面里的请求地址不能写死，
+    所以在返回 HTML 前把占位脚本换成运行时常量 `window.__API_PREFIX__`：
+    前端所有请求统一经 `apiUrl()` 拼前缀，静态文件本身仍是原样交付。
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    if _API_PREFIX != "/api":
+        # 只在该前缀被改过时替换；默认部署直接原样返回，不做字符串扫描。
+        html = html.replace(
+            '<script>window.__API_PREFIX__="/api";</script>',
+            f"<script>window.__API_PREFIX__={json.dumps(_API_PREFIX)};</script>",
+            1,
+        )
+    return HTMLResponse(html)
 
 
 @app.get("/join")
@@ -410,7 +449,14 @@ def join_index():
     页面本身不含任何敏感数据；服务端唯一的防线是发码节流
     （见 admin/routers/login.py 的 `_check_sms_quota`）。
     """
-    return FileResponse(STATIC_DIR / "join.html")
+    html = (STATIC_DIR / "join.html").read_text(encoding="utf-8")
+    if _API_PREFIX != "/api":
+        html = html.replace(
+            '<script>window.__API_PREFIX__="/api";</script>',
+            f"<script>window.__API_PREFIX__={json.dumps(_API_PREFIX)};</script>",
+            1,
+        )
+    return HTMLResponse(html)
 
 
 import mimetypes

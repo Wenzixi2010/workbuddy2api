@@ -4,6 +4,44 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WorkBuddy 共享管理后台</title>
+  <!-- 管理接口前缀：默认 /api；服务端按 ADMIN_API_PREFIX 改写这一行。 -->
+  <script>window.__API_PREFIX__="/api";</script>
+  <script>
+    /* 把页面里写的 `/api/xxx` 拼到实际生效的前缀上。
+       页面内继续写 /api/... 保持可读，只在真正发请求时换前缀。 */
+    window.apiUrl = function (path) {
+      var p = window.__API_PREFIX__ || "/api";
+      if (p === "/api" || typeof path !== "string" || path.indexOf("/api/") !== 0) return path;
+      return p + path.slice(4);
+    };
+    /* `<link>` / `<img>` 这类标签没法自己调用 JS，统一打 data-api-path 标记后在此改写。 */
+    window.__applyApiPrefixToTags__ = function () {
+      var p = window.__API_PREFIX__ || "/api";
+      if (p === "/api") return;
+      document.querySelectorAll("[data-api-path]").forEach(function (el) {
+        var attr = el.getAttribute("data-api-path");
+        var v = el.getAttribute(attr);
+        if (v) el.setAttribute(attr, window.apiUrl(v));
+      });
+    };
+    document.addEventListener("DOMContentLoaded", function () { window.__applyApiPrefixToTags__(); });
+
+    /* 兜底：拦一层全局 fetch。
+       页面与外部脚本里还散落着裸 fetch('/api/...')（登录、版本检查、各插件脚本）。
+       与其挨个改，不如在唯一入口处统一换前缀 —— 只管 `/api/` 开头的地址，
+       其它请求（/static、/v1、第三方）原样放行，行为与改造前一致。 */
+    (function () {
+      if ((window.__API_PREFIX__ || "/api") === "/api") return;
+      var rawFetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        if (typeof input === "string") input = window.apiUrl(input);
+        else if (input && typeof input.url === "string" && input.url.indexOf("/api/") === 0) {
+          input = new Request(window.apiUrl(input.url), input);
+        }
+        return rawFetch(input, init);
+      };
+    })();
+  </script>
   <script src="/static/theme.js"></script>
   <script src="/static/filter-combobox.js"></script>
   <!--
@@ -702,19 +740,19 @@
 @media(max-width:480px){.upload-footer{gap:10px}.upload-footer-note{flex-basis:100%;order:3}.upload-file-input::file-selector-button{padding:8px 10px;margin-right:8px}}
   </style>
   <link rel="stylesheet" href="/static/console.css" />
-  <link rel="icon" href="/api/app/icon" type="image/svg+xml" />
+  <link rel="icon" href="/api/app/icon" data-api-path="href" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/desktop.css" />
   <script>if(new URLSearchParams(location.search).get('desktop')==='1') document.documentElement.classList.add('desktop-mode');</script>
 </head>
 <body>
-<div id="localBoot"><img src="/api/app/icon" alt=""/><p id="localBootStatus">正在打开本地工作台…</p><button type="button" onclick="WBDesktop.retryLocal()">重新连接</button></div>
+<div id="localBoot"><img src="/api/app/icon" data-api-path="src" alt=""/><p id="localBootStatus">正在打开本地工作台…</p><button type="button" onclick="WBDesktop.retryLocal()">重新连接</button></div>
 
 <!-- 登录 -->
 <div id="login" class="login-wrap">
   <form class="login-card" onsubmit="event.preventDefault(); doLogin();">
     <div class="login-brand">
       <div class="login-logo" aria-hidden>
-        <img src="/api/app/icon" alt="" width="26" height="26" />
+        <img src="/api/app/icon" data-api-path="src" alt="" width="26" height="26" />
       </div>
       <div>
         <div class="login-title">WorkBuddy2API</div>
@@ -745,7 +783,7 @@
         <i class="fa-solid fa-bars"></i>
       </button>
       <div class="side-brand">
-        <img src="/api/app/icon" alt="WorkBuddy2API" width="36" height="36" class="shrink-0" />
+        <img src="/api/app/icon" data-api-path="src" alt="WorkBuddy2API" width="36" height="36" class="shrink-0" />
         <div class="min-w-0 side-title">
           <div class="fs-13-5 font-semibold leading-tight" style="letter-spacing:-.02em">WorkBuddy</div>
           <div class="text-[11px] leading-tight" style="color:var(--fg-subtle)">共享管理后台</div>
@@ -1695,12 +1733,12 @@ async function api(path, opts = {}) {
   // concurrent panel loads share one bridge call and never need a login form.
   if (localShell) await ensureLocalSession();
   opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
-  let response = await fetch(path, opts);
+  let response = await fetch(apiUrl(path), opts);
   if (response.status === 401 && localShell) {
     try {
       await ensureLocalSession(true);
       opts.headers['X-Admin-Token'] = TOKEN;
-      response = await fetch(path, opts);
+      response = await fetch(apiUrl(path), opts);
     } catch (_) {}
   }
   return response;
@@ -1777,7 +1815,7 @@ async function doLogin() {
     if (el) { el.textContent = m; el.classList.remove("hidden"); }
   };
   try {
-    const r = await fetch("/api/login", { method: "POST", body: fd });
+    const r = await fetch(apiUrl("/api/login"), { method: "POST", body: fd });
     if (!r.ok) {
       // 尽量给出真实原因，而不是笼统的"登录失败"
       let msg = "登录失败";
@@ -6007,7 +6045,7 @@ function openLogActivityStream(key) {
     if (!ok || !data.ticket) throw new Error(data.detail || '票据获取失败');
     const qs = new URLSearchParams({limit: '40', ticket: data.ticket});
     if (key) qs.set('key', key);
-    const source = new EventSource('/api/logs/requests/stream?' + qs.toString());
+    const source = new EventSource(apiUrl('/api/logs/requests/stream') + '?' + qs.toString());
     _logActivityStream = source;
     _logActivityStreamKey = key;
     source.addEventListener('activity', ev => {

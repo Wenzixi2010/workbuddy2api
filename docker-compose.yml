@@ -14,13 +14,18 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.docker}
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?Set ADMIN_JWT_SECRET in .env.docker}
+      # 管理接口路径前缀：默认 /api。改成 /xxx/api 之类可把面板藏到子路径后面，
+      # 部署时在本机 .env.docker 里设置即可，无需改镜像。
+      ADMIN_API_PREFIX: ${ADMIN_API_PREFIX:-/api}
       TZ: Asia/Shanghai
     command: ["python3", "-m", "uvicorn", "admin.server:app", "--host", "0.0.0.0", "--port", "8790"]
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/app/version', timeout=3)"]
+      # 路径前缀可配，所以健康检查从容器内的 ADMIN_API_PREFIX 取，
+      # 不能写死 /api —— 否则改前缀后容器会一直 unhealthy。
+      test: ["CMD", "python3", "-c", "import os,urllib.request; p=(os.getenv('ADMIN_API_PREFIX') or '/api').strip('/'); urllib.request.urlopen('http://127.0.0.1:8790/'+p+'/app/version', timeout=3)"]
       interval: 30s
       timeout: 5s
       start_period: 30s

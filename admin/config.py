@@ -69,6 +69,33 @@ class Settings:
     HOST = os.getenv("ADMIN_HOST", "0.0.0.0")
     PORT = int(os.getenv("ADMIN_PORT", "8790"))
 
+    #: 后台管理接口的路径前缀（参考 openlist 的 `--api-prefix`）。
+    #:
+    #: 默认 `/api`，与历史行为完全一致。把它改成 `/xxx/api` 之类的自定义前缀后，
+    #: 全部管理接口（账号、Key、模型、同步、日志…）都会改挂到该前缀下，
+    #: 用于把面板藏在反代的子路径后面（如 `https://host/panel/api/...`）。
+    #:
+    #: 归一化规则在这里一次性做掉，避免下游各自处理：
+    #:   * 空串 / 只写斜杠 → 回退默认 `/api`（不允许把管理接口挂到根，否则
+    #:     会与 `/v1`、`/gw`、`/admin`、`/static` 这些既有路径争抢命名空间）；
+    #:   * 自动补前导斜杠、去掉结尾斜杠；
+    #:   * 允许中间带路径（`/xxx/api`），但拒绝 `..` 与空白。
+    #:
+    #: 只前缀管理接口，**不改** `/v1/*`、`/gw/*`、`/admin`、`/join`、`/static`：
+    #: 那些是客户端与安装包写死的对外契约，跟着变会让已有部署集体失联。
+    def _normalize_api_prefix(raw: str) -> str:
+        value = (raw or "").strip()
+        if not value or value == "/":
+            return "/api"
+        if any(ch.isspace() for ch in value) or ".." in value:
+            _logger.warning("ADMIN_API_PREFIX 含空白或 `..`，已回退默认 /api")
+            return "/api"
+        value = "/" + value.strip("/")
+        return value
+
+
+    API_PREFIX = _normalize_api_prefix(os.getenv("ADMIN_API_PREFIX", "/api"))
+
     #: 是否对公网开放 OpenAPI 文档（`/docs`、`/redoc`、`/openapi.json`）
     #: 以及内嵌网关的 `/gw/docs`、`/gw/openapi.json`。
     #:
