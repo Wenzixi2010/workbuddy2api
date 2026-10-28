@@ -598,6 +598,36 @@ def ua() -> str:
     return effective().get("user_agent") or _build_ua(None, None)
 
 
+#: 国际版（global realm）UA 的第二段品牌 slug。
+#:
+#: 官方两个分发包的 `productName` 不同，打包期 `applicationName` 又被改写，
+#: 于是真机抓包得到两种第二段（2026-10-20/21 同机同代理实测）：
+#:
+#:   国内版 5.8.3（productName `WorkBuddy`）→ `WorkBuddy/5.8.3` 驼峰原样
+#:   国际版 5.8.4（productName `WorkBuddy AI`）→ `workbuddy-ai/5.8.4` 小写连字符
+#:
+#: 国际版包走 Electron 的 `userAgentFallback` 替换路径（asciiSlug：非字母数字换
+#: `-` 并转小写），`WorkBuddy AI` 因此变成 `workbuddy-ai`。首段**恒为驼峰**
+#: `WorkBuddy`（OpenAI SDK 的 buildUserAgent 固定 productName），只有第二段换品牌。
+#:
+#: 品牌段送错是**可识别的非官方指纹**：国际版账号整体用国内品牌段会被上游判成
+#: 「客户端与账号域不匹配」，直接 `400 code=11128 request illegal`——这也正是
+#: 国际版测速失败的真因，与 token 的 scope / acr 无关。
+GLOBAL_UA_BRAND = "workbuddy-ai"
+
+
+def ua_for_global(is_global: bool) -> str:
+    """按 realm 取出的出站 UA（国际版第二段换成 `workbuddy-ai` 品牌段）。
+
+    国内账号零回归：`is_global=False` 时与 `ua()` 完全一致。
+    """
+    if not is_global:
+        return ua()
+    v = desktop_version()
+    c = cli_version()
+    return f"WorkBuddy/{v} {GLOBAL_UA_BRAND}/{v} CLI/{c}"
+
+
 def desktop_version() -> str:
     return str(effective().get("desktop_version") or DEFAULTS["desktop_version"])
 

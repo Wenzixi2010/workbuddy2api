@@ -156,13 +156,17 @@ CLI_VERSION = _PROFILE_AT_IMPORT["cli_version"]
 USER_AGENT = _PROFILE_AT_IMPORT["user_agent"]
 
 
-def client_user_agent() -> str:
+def client_user_agent(is_global: bool = False) -> str:
     """**实时的**出站 UA（后台改版本号后立即生效，无需重启）。
 
     `USER_AGENT` 常量在导入时算好，适合静态引用；发请求建议用本函数，
     它会问档案（内部 30 秒缓存，保存时立即失效，开销可忽略）。
+
+    `is_global=True` 时把 UA 第二段的品牌换成国际版 slug `workbuddy-ai`
+    （官方国际版包的 productName `WorkBuddy AI` 经 asciiSlug 得到）。
+    品牌段与账号域不匹配是可识别的非官方指纹，会被上游 11128 拦截。
     """
-    return cprofile.ua()
+    return cprofile.ua_for_global(is_global)
 
 
 def describe_client() -> str:
@@ -391,7 +395,13 @@ class CredentialManager:
             "X-Enterprise-Id": account.get("enterpriseId", ""),
             "X-Tenant-Id": account.get("enterpriseId", ""),
             "X-Domain": domain,
-            "User-Agent": client_user_agent(),
+            # UA 的品牌段必须跟着账号所在的 realm 走：国际版分发包的
+            # `productName` 是 `WorkBuddy AI`，Electron 的 userAgentFallback
+            # 把它 asciiSlug 成 `workbuddy-ai`（小写连字符）。首段恒为驼峰。
+            # 用国内品牌段打国际域 = 最明显的「客户端与账号域不匹配」指纹，
+            # 上游直接 400 code=11128 request illegal。
+            "User-Agent": client_user_agent(
+                is_global=bool(domain and any(d in domain for d in INTL_DOMAINS))),
         }
         # 风控设备头：与桌面端 Turing Shield 一致，缺失会被上游识别为异常客户端。
         # 取不到（桌面端未安装 / SDK 不支持）时优雅降级为不带该头，不影响主流程。
