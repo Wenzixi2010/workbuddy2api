@@ -1294,9 +1294,33 @@ INTL_SITES = {
         "api": "https://www.workbuddy.ai", "origin": "https://www.workbuddy.ai",
         "platform": "workbuddy",
     },
+    # 桌面端（WorkBuddyAI）真实使用的授权入口。
+    # 逆向 `account.js` 得到：桌面端登录跳转 `{origin}/login?platform=agents&state=0`。
+    # 注意：实测该入口在浏览器里会被导向下载页（它面向的是桌面端 App 的
+    # 自定义协议回调，不是网页登录），因此 `intl_start_login("workbuddy-agents")`
+    # 只适合在能唤起桌面端的场景使用，一般网页接力请用 `workbuddy`。
+    "workbuddy-agents": {
+        "api": "https://www.workbuddy.ai", "origin": "https://www.workbuddy.ai",
+        "platform": "agents",
+    },
 }
 
 #: 官方登录码语义（panel loginsite 码表移植）。
+#:
+#: 国际版账号调用 `/v2/chat/completions` 报 `11128 request illegal` 的判定依据
+#: （实测，非推测）：
+#:
+#:   | 账号                | scope                                              | acr |
+#:   |---------------------|----------------------------------------------------|-----|
+#:   | 国内版（可用）      | acr offline_access profile basic roles email ...    |  1  |
+#:   | 国际版（11128）     | openid profile offline_access email                 |  0  |
+#:
+#: 国际版 token 还缺 `app_type` / `sub_type` / `token_source` / `session_state`
+#: 等产品线标识。`acr=0` 表示仅基础认证，`acr=1` 表示过了完整认证（带角色与
+#: 组织信息）。**这些差异不能用请求头伪造**——`acr` 和 `scope` 是签发时写进
+#: JWT 的，改任何 header（含照抄客户端 `applyGatewayHeaders` 全套）都无效。
+#: 重新走 `platform=CLI`、`platform=workbuddy` 两条授权链，签出来的仍是
+#: `acr=0`，所以这是账号侧的授权状态问题，不是登录入口或反代代码的问题。
 _INTL_CODE_RETRY_FETCH_TOKEN = 11217     # login ing...（继续轮询）
 _INTL_CODE_RETRY_FETCH_ACCOUNT = 12151   # token 已发、账号信息未落库（继续轮询）
 _INTL_CODES_PENDING = (_INTL_CODE_RETRY_FETCH_TOKEN, _INTL_CODE_RETRY_FETCH_ACCOUNT)
