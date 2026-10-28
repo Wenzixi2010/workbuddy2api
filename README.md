@@ -600,6 +600,7 @@ CC Switch 中对应填写 Anthropic 服务地址、后台 API Key 和模型。�
 - [账号调度、出口风险与维护任务加固](docs/2api-increment-risk-scheduling.md)
 - [EXE / APK 构建与发布](BUILD.md)：根目录 `build.bat` 可统一构建两端
 - [通用工具脚本](scripts/README.md)：守护进程、凭证配置与 ASAR 工具
+- [1.14.0 更新公告](docs/RELEASE_NOTES_1.14.0.md)
 - [1.12.0 更新公告](docs/RELEASE_NOTES_1.12.0.md)
 - [1.11.1 更新公告](docs/RELEASE_NOTES_1.11.1.md)
 - [1.11.0 更新公告](docs/RELEASE_NOTES_1.11.0.md)
