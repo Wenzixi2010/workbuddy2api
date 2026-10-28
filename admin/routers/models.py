@@ -475,9 +475,6 @@ async def _speed_test_run(body, request, db):
         extra = dict(_cprofile.risk_headers())
         extra["X-Agent-Purpose"] = "model-probe"
         extra.update(_session_headers({"model": model}, acc.uid or ""))
-        if acc.uid:
-            extra["X-Machine-ID"] = backend.stable_device_id(acc.uid, "machine")
-            extra["X-Session-ID"] = backend.stable_device_id(acc.uid, "session")
         # 客户端 IP 头：正式链路由 `_upstream_extra_headers` 从真实请求里取。
         # 测速是后台自己发起的，没有客户端请求可依，用本机出口地址占位 ——
         # 缺这一组同样会被判成「没有客户端来源」的网关特征。

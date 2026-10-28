@@ -297,6 +297,12 @@ def _upstream_extra_headers(request: Request, purpose: str = "conversation",
         "X-Agent-Purpose": purpose or "conversation",
     }
     h.update(cprofile.risk_headers())
+    # chat 出站头剥离（对齐 panel 参考实现 ChatHeaders 的真机抓包结论）：
+    # CLI/桌面端 chat 从不发 Origin / Referer / Accept-Language —— CLI 没有浏览器
+    # 语义，Accept-Language 只有 billing 层才偶发。risk_headers() 是 REST 层通用
+    # 形态（billing/checkin 还要用），chat 路径在这里剥掉，避免多余指纹。
+    for _k in ("Origin", "Referer", "Accept-Language"):
+        h.pop(_k, None)
     # 档案里的 ide_name 允许被 ADMIN_UPSTREAM_CLIENT_NAME 覆盖（历史行为保持一致）
     override = settings.UPSTREAM_CLIENT_NAME.strip()
     if override:
@@ -313,11 +319,10 @@ def _upstream_extra_headers(request: Request, purpose: str = "conversation",
         if custom:
             h[custom] = ip
 
-    # 账号级稳定设备标识（需知道 uid）
-    uid = (account.uid or "") if account is not None else ""
-    if uid:
-        h["X-Machine-ID"] = backend.stable_device_id(uid, "machine")
-        h["X-Session-ID"] = backend.stable_device_id(uid, "session")
+    # 账号级稳定设备标识 —— **已移除**（对齐 panel 参考实现真机抓包结论）：
+    # X-Machine-ID / X-Session-ID 是网关自造的派生值，官方桌面端 chat 从不发
+    # 这两个头（capture/raw3 + raw8 逐头对照）；panel 的 ChatHeaders 显式 Del。
+    # 多发一个客户端从不发的头本身就是最直观的非官方指纹。
 
     # Turing Shield 设备风控指纹（缺失会被上游判为非官方客户端 → 11128）
     try:
@@ -2667,9 +2672,6 @@ async def chat_completions(
                         # 会话头族 + 账号级设备标识按本次账号重算（设备标识是账号维度）
                         extra = await _blocking_call(_upstream_extra_headers, request)
                         extra.update(session_hdr)
-                        if acc_i.uid:
-                            extra["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
-                            extra["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                         headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra)
                         try:
                             url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
@@ -3139,9 +3141,6 @@ async def responses_proxy(
                         continue
                     extra_i = await _blocking_call(_upstream_extra_headers, request)
                     extra_i.update(session_hdr)
-                    if acc_i.uid:
-                        extra_i["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
-                        extra_i["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                     headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
                     try:
                         _dt = headers_i.get("X-Device-Token", "")
@@ -3310,9 +3309,6 @@ async def responses_proxy(
                             continue
                         extra_i = await _blocking_call(_upstream_extra_headers, request)
                         extra_i.update(session_hdr)
-                        if acc_i.uid:
-                            extra_i["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
-                            extra_i["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                         headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
                         raw_lines.clear()
                         delivered = False
@@ -3614,9 +3610,6 @@ async def anthropic_messages(
                         continue
                     extra_i = await _blocking_call(_upstream_extra_headers, request)
                     extra_i.update(session_hdr)
-                    if acc_i.uid:
-                        extra_i["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
-                        extra_i["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                     headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
                     try:
                         _dt = headers_i.get("X-Device-Token", "")
@@ -3787,9 +3780,6 @@ async def anthropic_messages(
                             continue
                         extra_i = await _blocking_call(_upstream_extra_headers, request)
                         extra_i.update(session_hdr)
-                        if acc_i.uid:
-                            extra_i["X-Machine-ID"] = backend.stable_device_id(acc_i.uid, "machine")
-                            extra_i["X-Session-ID"] = backend.stable_device_id(acc_i.uid, "session")
                         headers_i = await _blocking_call(_headers_for_attempt, sess_i, extra_i)
                         url_i = f"{sess_i.cm.api_base()}/v2/chat/completions"
                         _dt = headers_i.get("X-Device-Token", "")

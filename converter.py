@@ -609,10 +609,52 @@ class CredentialManager:
     def fetch_balance(self) -> dict:
         """获取当前账号积分汇总，仅返回总量与剩余（可用积分）。
 
-        注意：必须使用 CycleCapacityRemain（当前周期剩余），而不是 CapacityRemain。
-        CodeBuddy 个人体验版等一次性资源在账号层级 CapacityRemain 仍显示原始额度，
-        但当期已用完后 CycleCapacityRemain 为 0；界面上的「累积剩余」也以周期剩余为准。
+        端点按账号所在域分两套（与 panel 参考实现及官方客户端一致）：
+
+        * **国际版**（domain 属 INTL_DOMAINS）→
+          `POST /billing/meter/get-user-resource-summary`，取
+          `Packages[].CycleRemainCapacity / CycleTotalCapacity` 逐包求和。
+          summary 是「当前周期的权威用量」，客户端套餐页显示的就是它。
+        * **国内版** → `POST /v2/billing/meter/get-user-resource`，
+          取 `Accounts[].CycleCapacityRemain`。
+
+        两者都必须用 **Cycle**（当前周期）口径而不是 Capacity（原始额度）：
+        一次性资源包当期用完后 CapacityRemain 仍显示原始值，周期剩余才为 0。
+        之前国际版也走国内旧端点，返回的包结构与周期口径都不同，
+        面板余额于是与客户端对不上。
         """
+        try:
+            domain = str((self._session().get("auth") or {}).get("domain") or "")
+        except Exception:
+            domain = ""
+        if domain and any(d in domain for d in INTL_DOMAINS):
+            data = self._request_backend(
+                "POST", "/billing/meter/get-user-resource-summary", {})
+            # summary 响应结构（2026-10-28 实测）：
+            #   {"code":0,"data":{"Packages":[{...}], "TotalCredits":"338.04", ...}}
+            # 与国内旧端点的 data.Response.Data.Accounts 不同层；
+            # 容量是**字符串**（"250"、"88.04"），CapacityUnit 有 "credit" 与
+            # "credits" 两种形态，过滤时两者都放行。
+            packages = ((data.get("data") or {}).get("Packages")) or []
+
+            def _num(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            total = 0.0
+            total_size = 0.0
+            for p in packages:
+                if not isinstance(p, dict):
+                    continue
+                if str(p.get("CapacityUnit") or "credits") not in ("credit", "credits"):
+                    continue
+                total += _num(p.get("CycleRemainCapacity"))
+                total_size += _num(p.get("CycleTotalCapacity"))
+            remain = round(total, 2)
+            # 国际版积分带小数（88.04），总量向下取整保持「总积分」语义清晰
+            return {"total": int(total_size), "remain": remain}
         data = self._request_backend("POST", "/v2/billing/meter/get-user-resource", {})
         resp = data.get("data", {}).get("Response", {}).get("Data", {}) or {}
         total = 0
