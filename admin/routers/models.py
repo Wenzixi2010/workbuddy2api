@@ -459,6 +459,52 @@ async def _speed_test_run(body, request, db):
             sess.close()
         POOL.release(acc.uid or "")
         raise
+    # 补齐官方客户端的风控头与会话头族。
+    #
+    # 只发 `get_headers()` 的裸鉴权头会被上游判为「非官方客户端通道」，
+    # 直接返回 code=11128 request illegal —— 实测 gpt-5.4 等国际版模型必现。
+    # 正式对话链路（/v1/messages、/v1/chat/completions）都经
+    # `_upstream_extra_headers` + `_session_headers` 注入这一整套，测速走的是
+    # 同一条上游、同一个账号，头却只有一半，所以按同一口径补齐。
+    #
+    # 这里拿不到真实客户端请求（测速是后台自己发起的），故只补与来源 IP 无关
+    # 的两类：归属/风控闸门头（risk_headers）与账号级设备标识、会话头族。
+    try:
+        from admin import client_profile as _cprofile
+        from admin.routers.proxy import _session_headers
+        extra = dict(_cprofile.risk_headers())
+        extra["X-Agent-Purpose"] = "model-probe"
+        extra.update(_session_headers({"model": model}, acc.uid or ""))
+        if acc.uid:
+            extra["X-Machine-ID"] = backend.stable_device_id(acc.uid, "machine")
+            extra["X-Session-ID"] = backend.stable_device_id(acc.uid, "session")
+        # 客户端 IP 头：正式链路由 `_upstream_extra_headers` 从真实请求里取。
+        # 测速是后台自己发起的，没有客户端请求可依，用本机出口地址占位 ——
+        # 缺这一组同样会被判成「没有客户端来源」的网关特征。
+        _ip = ""
+        try:
+            from admin.routers.proxy import _client_ip
+            _ip = _client_ip(request) or ""
+        except Exception:
+            _ip = ""
+        if _ip:
+            extra["X-Forwarded-For"] = _ip
+            extra["X-Real-IP"] = _ip
+            extra["X-Client-IP"] = _ip
+        # Turing Shield 设备风控指纹：缺失会被上游判为「非官方客户端通道」，
+        # 直接返回 code=11128 request illegal —— 这是国际版模型测速必现的原因。
+        # 正式链路每次都在 `_upstream_extra_headers` 里注入它，测速必须一致。
+        try:
+            from admin.turing_token import get_device_token
+            _tok = get_device_token()
+            if _tok:
+                extra["X-Device-Token"] = _tok
+        except Exception:
+            pass
+        headers = {**headers, **extra}
+    except Exception:
+        # 补头失败不该让测速整体失败：宁可少几个头，也要给出真实的上游结果。
+        pass
     url = f"{sess.cm.api_base()}/v2/chat/completions"
     payload = {
         "model": model,

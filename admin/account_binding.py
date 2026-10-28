@@ -57,11 +57,20 @@ def scope_accounts(query, account_id=None, key_id=None):
             ApiKey.account_id.is_not(None),
             or_(ApiKey.account_id == Account.id,
                 (reserved.uid != "") & (reserved.uid == Account.uid))).exists()
-    multi_owned = select(ApiKeyAccount.id).join(
-        ApiKey, ApiKey.id == ApiKeyAccount.key_id).where(
+    # ⚠️ `reserved` 必须**显式 join** 到 ApiKeyAccount.account_id 上。
+    #
+    # 原来这里只 `join(ApiKey, ...)` 就把 `reserved` 写进了 where，SQLAlchemy 于是
+    # 生成 `FROM api_key_accounts JOIN api_keys ..., accounts AS accounts_1` ——
+    # 一个**没有 ON 条件的交叉连接**。结果 `accounts_1.uid != ''` 这句对整张
+    # accounts 表恒成立，`multi_owned` 恒为真，所有账号被一并排除出公共池：
+    # 现象就是「所有账号凭空消失，选号返回 None，测速提示没有可检测账号」。
+    reserved_multi = aliased(Account)
+    multi_owned = select(ApiKeyAccount.id).select_from(ApiKeyAccount).join(
+        ApiKey, ApiKey.id == ApiKeyAccount.key_id).outerjoin(
+        reserved_multi, reserved_multi.id == ApiKeyAccount.account_id).where(
         ApiKey.status == "active",
         or_(ApiKeyAccount.account_id == Account.id,
-            (reserved.uid != "") & (reserved.uid == Account.uid))).exists()
+            (reserved_multi.uid != "") & (reserved_multi.uid == Account.uid))).exists()
     return query.filter(~legacy_owned, ~multi_owned)
 
 

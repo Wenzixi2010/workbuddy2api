@@ -251,6 +251,11 @@ def delete_key(key_id: int, _: bool = Depends(require_admin), db: Session = Depe
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
+    # 必须先删关联表里的独占绑定，否则会留下孤儿记录：
+    # `scope_accounts` 按 `ApiKeyAccount.key_id` 判独占，不校验 Key 是否还存在，
+    # 于是这些账号会被永久视为「已被某个 Key 独占」，从此再也选不出来 ——
+    # 表现就是「删了 Key 之后，某些账号凭空从公共池消失」。
+    db.query(ApiKeyAccount).filter(ApiKeyAccount.key_id == key_id).delete(synchronize_session=False)
     db.delete(k)
     db.commit()
     return {"id": key_id, "ok": True}
