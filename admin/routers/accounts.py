@@ -14,7 +14,10 @@ from sqlalchemy import func, case
 
 from admin import backend, jobrunner, wb_login, upstream_errors
 from admin.account_binding import binding_owners, scope_accounts
-from admin.credential_codec import CredentialDecodeError, encrypt_credential, normalize_credential
+from admin.credential_codec import (
+    CredentialDecodeError, encrypt_credential, normalize_credential,
+    split_import_payload,
+)
 from admin.config import settings
 from admin.db import SessionLocal, get_db
 from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, UsageLog
@@ -681,7 +684,14 @@ def clear_account_cooldown(acc_id: int,
 
 @router.post("")
 def add_account(body: AccountIn, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
-    body.auth_json = _decode_or_400(body.auth_json)
+    # 兼容 workbuddy-switch 导出格式：单对象直接转；数组只允许 1 条（多条请走批量）。
+    expanded = split_import_payload(body.auth_json)
+    if len(expanded) > 1:
+        raise HTTPException(status_code=400, detail={
+            "message": f"导入内容包含 {len(expanded)} 个账号 —— 请使用「批量导入」，单条上传一次只能加一个",
+            "step": "split",
+        })
+    body.auth_json = _decode_or_400(expanded[0])
     # 第一道：只收「auth 之后的授权 JSON」，非凭证一律 400
     _reject_non_credential(body.auth_json)
     # 第二道：**真调上游**确认凭证可用、非伪造，并取回真实账号信息 + 余额
@@ -763,9 +773,23 @@ def batch_add(body: AccountBatchIn, _: bool = Depends(require_admin), db: Sessio
     # 一次性取出已有 uid，避免每条都查库；
     # 同时把自己刚加进去的 uid 也塞进去，这样同一批里的重复项也能拦住
     seen = _existing_uid_index(db)
+    # 预展开：兼容 workbuddy-switch 导出格式（单对象 / JSON 数组）。
+    # 一条 body.items 元素里塞一整个数组文件时，在这里拆成逐账号候选。
+    candidates: list = []
     for it in body.items:
         if not it.auth_json or not it.auth_json.strip():
             continue
+        try:
+            expanded = split_import_payload(it.auth_json)
+        except Exception as exc:
+            errors.append(f"跳过一条：导入格式解析失败（{type(exc).__name__}）")
+            continue
+        if len(expanded) > 1:
+            it.name = ""   # 数组导入时每账号名走上游昵称，不沿用外层占位名
+        for cred in expanded:
+            candidates.append((it, cred))
+    for it, cred_json in candidates:
+        it.auth_json = cred_json
         try:
             it.auth_json = normalize_credential(it.auth_json)
         except CredentialDecodeError as exc:

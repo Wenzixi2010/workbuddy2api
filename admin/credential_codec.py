@@ -122,6 +122,92 @@ def _open_field(wrapper: dict, key_id: str, key: bytes) -> str:
         raise CredentialDecodeError('加密凭证损坏或校验失败，请重新导出客户端凭证或使用手机号授权登录') from None
 
 
+def _looks_like_switch_item(obj: object) -> bool:
+    """workbuddy-switch 导出格式的单条账号对象特征。
+
+    特征（与网关凭证结构区分）：顶层没有 `auth`/`account` 对象，取而代之是
+    `uid` + `access_token`/`refresh_token`（snake_case）或 `auth_raw` 汇总块。
+    """
+    if not isinstance(obj, dict):
+        return False
+    if isinstance(obj.get("auth"), dict) and isinstance(obj.get("account"), dict):
+        return False  # 已是网关标准形态
+    has_uid = isinstance(obj.get("uid"), str) and obj["uid"]
+    has_tokens = isinstance(obj.get("access_token"), str) or isinstance(obj.get("refresh_token"), str)
+    has_raw = isinstance(obj.get("auth_raw"), dict)
+    return has_uid and (has_tokens or has_raw)
+
+
+def convert_switch_credential(item: dict) -> str:
+    """把 workbuddy-switch 导出的一条账号对象转成网关标准凭证 JSON。
+
+    转换规则（switch 格式字段 → 网关字段）：
+      * `auth_raw.auth` 优先 —— 它本来就是完整网关形态的 `auth` 块；
+        缺失时从顶层 `access_token` / `refresh_token` / `token_type` /
+        `domain` / `expiresAt` 现拼。
+      * `auth_raw.account` 同理优先，缺失时从 `profile_raw` 或
+        uid/nickname/enterpriseId 兜底。
+      * 每账号设备风控 token（`device_token` 或 `device.deviceToken`）写入
+        `auth.deviceToken` 保留 —— 本机 Turing SDK 不可用时它是唯一指纹来源。
+    """
+    raw_auth = item.get("auth_raw") or {}
+    auth = dict(raw_auth.get("auth") or {}) if isinstance(raw_auth, dict) else {}
+    if not auth:
+        auth = {
+            "accessToken": item.get("access_token") or "",
+            "refreshToken": item.get("refresh_token") or "",
+            "tokenType": item.get("token_type") or "Bearer",
+        }
+        if item.get("domain"):
+            auth["domain"] = item["domain"]
+        if item.get("expiresAt"):
+            auth["expiresAt"] = item["expiresAt"]
+    device_token = (item.get("device_token")
+                    or ((item.get("device") or {}).get("deviceToken")
+                        if isinstance(item.get("device"), dict) else None))
+    if device_token and not auth.get("deviceToken"):
+        auth["deviceToken"] = device_token
+
+    account = dict(raw_auth.get("account") or {}) if isinstance(raw_auth, dict) else {}
+    if not account:
+        profile = item.get("profile_raw") if isinstance(item.get("profile_raw"), dict) else {}
+        account = {
+            "uid": item.get("uid") or profile.get("uid") or "",
+            "nickname": item.get("nickname") or profile.get("nickname") or "",
+            "enterpriseId": item.get("enterpriseId")
+                            or profile.get("enterpriseId") or "",
+        }
+    data = {
+        "uid": item.get("uid") or account.get("uid") or "",
+        "nickname": item.get("nickname") or account.get("nickname") or "",
+        "domain": item.get("domain") or auth.get("domain") or "",
+        "account": account,
+        "auth": auth,
+    }
+    return json.dumps(data, ensure_ascii=False)
+
+
+def split_import_payload(raw: str) -> list[str]:
+    """把导入原文拆成「每账号一份标准凭证 JSON」的列表。
+
+    兼容三种形态：
+      1. 网关标准单条凭证（含加密字段）—— 原样走 normalize_credential；
+      2. workbuddy-switch 导出的**单条**账号对象 —— convert_switch_credential；
+      3. switch 导出的**数组**（文件导入最常见）—— 逐条转换。
+    非 JSON 原样返回（交给既有校验器报错）。
+    """
+    try:
+        data = json.loads(raw.lstrip('\ufeff').strip())
+    except (ValueError, TypeError):
+        return [raw]
+    if isinstance(data, list):
+        return [convert_switch_credential(el) for el in data
+                if _looks_like_switch_item(el)] or [raw]
+    if _looks_like_switch_item(data):
+        return [convert_switch_credential(data)]
+    return [raw]
+
+
 def normalize_credential(raw: str) -> str:
     """Keep legacy JSON unchanged; fully decode encrypted fields before validation."""
     try:

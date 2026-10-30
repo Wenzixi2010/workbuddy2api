@@ -166,6 +166,10 @@ _mount(logs.router)
 _mount(groups.router)
 _mount(stats.router)
 _mount(credits.router)
+# OpenAI 兼容中转站计费接口（/v1/dashboard/billing/*）—— DSH 小鲸鱼挂件
+# 的 OneAPI/New API 余额模板直接可用（sk- 代理 Key 鉴权，路径不带 /api）。
+from admin.routers import billing_compat
+_mount(billing_compat.router)
 _mount(maintenance.router)
 _mount(growth.router)
 _mount(growth_center.router)

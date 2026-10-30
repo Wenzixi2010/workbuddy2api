@@ -404,8 +404,10 @@ class CredentialManager:
                 is_global=bool(domain and any(d in domain for d in INTL_DOMAINS))),
         }
         # 风控设备头：与桌面端 Turing Shield 一致，缺失会被上游识别为异常客户端。
-        # 取不到（桌面端未安装 / SDK 不支持）时优雅降级为不带该头，不影响主流程。
-        tok = _get_turing_device_token()
+        # 取值优先级：**凭证自带的每账号 deviceToken**（workbuddy-switch 导出格式
+        # 会把它放在 auth.deviceToken，是该账号在本机 SDK 不可用时唯一的真指纹）
+        # > 本机 Turing SDK 现算值。都没有时优雅降级为不带该头，不影响主流程。
+        tok = auth.get("deviceToken") or _get_turing_device_token()
         if tok:
             h["X-Device-Token"] = tok
         return h
