@@ -30,6 +30,8 @@ DSH 小鲸鱼挂件（dsh-whale-widget）的「自定义 API / 模型余额」�
 """
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
 
@@ -59,6 +61,92 @@ def _pool_remaining_credits(db: Session) -> float:
     rows = db.query(Account.balance_remain).filter(
         Account.status == "active").all()
     return float(sum((r[0] or 0) for r in rows))
+
+
+def _today_used_credits(db: Session, key: ApiKey) -> float:
+    """这把 Key 今天（北京时间自然日）消耗的积分（元）。
+
+    两级来源，取第一个非零：
+      1. UsageLog 按 api_key_id 聚合 —— 精确，只统计**经过本网关**的调用；
+      2. 回退到 CreditEvent 里今日的负向 delta 之和 —— 覆盖客户端绕过网关
+         直连上游、或上游活动扣费的情况（此时 UsageLog 没有记录，但余额
+         确实降了）。逐条记录本身带时间戳，日粒度是准的。
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import func
+    from admin.models import UsageLog
+    # 北京时间的今天 0 点 → UTC 起点（库里 created_at 存 UTC naive）
+    now_utc = datetime.utcnow()
+    now_bj = now_utc + timedelta(hours=8)
+    start_bj = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_bj - timedelta(hours=8)
+    try:
+        total = db.query(func.coalesce(func.sum(UsageLog.credits), 0.0)).filter(
+            UsageLog.api_key_id == key.id,
+            UsageLog.created_at >= start_utc,
+        ).scalar()
+        total = float(total or 0)
+    except Exception:
+        total = 0.0
+    if total > 0:
+        return total
+    # 回退：上游侧的余额变化（客户端绕过网关直连上游时会走到这里）。
+    # CreditEvent 逐条记录 delta（负数=消耗），按账号取今日负向之和。
+    try:
+        from admin.account_binding import _bound_account_ids
+        from admin.models import CreditEvent
+        bound = _bound_account_ids(db, key.id)
+        # 只取 kind='observed' 的负向变动：那是「余额观察」，代表真实扣费。
+        # kind='confirmed' 是领取奖励（正向收入），不能计入消耗。
+        q = db.query(func.coalesce(func.sum(CreditEvent.delta), 0)).filter(
+            CreditEvent.created_at >= start_utc,
+            CreditEvent.kind == "observed",
+            CreditEvent.delta < 0,
+        )
+        if bound:
+            q = q.filter(CreditEvent.account_id.in_(bound))
+        neg = float(q.scalar() or 0)
+        return abs(neg)
+    except Exception:
+        return 0.0
+
+
+# 短 TTL 缓存：既让连续轮询看到余额变化（挂件靠余额差算 {today}），
+# 又不至于每次都被打成对上游的暴击。必须明显短于挂件的 60s 轮询周期。
+_LIVE_TTL = float(os.environ.get("BILLING_LIVE_TTL", "10"))
+_live_cache: dict[int, tuple[float, float]] = {}
+
+
+def _live_balance(acc) -> float | None:
+    """实时读某个账号的上游余额（失败返回 None，调用方回退缓存值）。"""
+    import time as _t
+    now = _t.time()
+    hit = _live_cache.get(int(acc.id))
+    if hit and (now - hit[0]) < _LIVE_TTL:
+        return hit[1]
+    try:
+        from admin import backend
+        with backend.AccountSession(acc.auth_json) as sess:
+            bal = sess.fetch_balance()
+        remain = float(bal.get("remain") or 0)
+    except Exception:
+        return None
+    _live_cache[int(acc.id)] = (now, remain)
+    return remain
+
+
+def _scope_live_credits(db: Session, key: ApiKey) -> float:
+    """这把 Key 可见余额的**实时**版本（取不到实时值时回退缓存值）。"""
+    from admin.account_binding import _bound_account_ids
+    bound = _bound_account_ids(db, key.id)
+    q = db.query(Account).filter(Account.status == "active")
+    if bound:
+        q = q.filter(Account.id.in_(bound))
+    total = 0.0
+    for acc in q.all():
+        live = _live_balance(acc)
+        total += float(acc.balance_remain or 0) if live is None else live
+    return total
 
 
 def _key_scope_credits(db: Session, key: ApiKey) -> float:
@@ -108,7 +196,9 @@ def billing_subscription(
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="无效 API Key")
     if key.unlimited:
-        total = _key_scope_credits(db, key)
+        # 用实时余额（带 20s 缓存）：挂件的「今日已用」靠余额差推算，
+        # 只读本地缓存会永远看不到变化，{today} 就一直是 0。
+        total = _scope_live_credits(db, key)
     else:
         # 有限额 Key：上限本身是「总额度」，此时 remaining = 上限 - 已用 成立，
         # 因为 credit_used 就是这把 Key 从自己额度里花掉的量，口径自洽。
@@ -151,11 +241,18 @@ def billing_usage(
     actual_used = float(key.credit_used or 0)
     # unlimited：余额已经是净额，报 0 避免二次扣减；有限额：报已用。
     used_credits = actual_used if not key.unlimited else 0.0
+    # 今日已用：从 UsageLog 真实统计（挂件的 {today} 需要这个量）。
+    # 挂件自己也会按「余额差」记账，但那条路依赖轮询正好跨过扣费时刻；
+    # 这里直接按日志聚合，任何时刻读都准。北京时间自然日。
+    today_used = _today_used_credits(db, key)
     return {
         "object": "list",
         # OneAPI/New API 字段名逐字对齐（挂件按 'total_usage' 取，单位美分）
         "total_usage": round(used_credits * 100, 2),
         # 诊断字段：这把 Key 的真实累计消费（元），不影响挂件计算
         "total_usage_credits_actual": round(actual_used, 4),
-        "daily_costs": [],
+        # 今日已用（元）+ OneAPI 口径的美分版，供挂件/人工核对
+        "today_usage_credits": round(today_used, 4),
+        "today_usage": round(today_used * 100, 2),
+        "daily_costs": [{"timestamp": 0, "line_item": "today", "cost": round(today_used * 100, 2)}],
     }
