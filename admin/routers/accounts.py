@@ -20,7 +20,7 @@ from admin.credential_codec import (
 )
 from admin.config import settings
 from admin.db import SessionLocal, get_db
-from admin.models import Account, AccountModelCooldown, ApiKey, ModelConfig, UsageLog
+from admin.models import Account, AccountModelCooldown, ApiKey, ApiKeyAccount, ModelConfig, UsageLog
 from admin.security import require_admin
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -472,6 +472,12 @@ def _credit_fields(a: Account) -> dict:
 def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.query(Account).order_by(Account.id.desc()).all()
     owners = binding_owners(db)
+    # 一个账号可能被多把 Key 绑定（绑定已非互斥），统计绑定数量供界面标注
+    bound_counts = {}
+    for k in db.query(ApiKey).filter(ApiKey.account_id.is_not(None)).all():
+        bound_counts[int(k.account_id)] = bound_counts.get(int(k.account_id), 0) + 1
+    for m in db.query(ApiKeyAccount).all():
+        bound_counts[int(m.account_id)] = bound_counts.get(int(m.account_id), 0) + 1
     now = datetime.utcnow()
     limits = _active_model_limits(db, now)
     from admin.post_login import states
@@ -488,6 +494,7 @@ def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db
             "max_in_flight": a.max_in_flight,
             "bound_key_id": owners[a.id].id if owners.get(a.id) else None,
             "bound_key_name": owners[a.id].name if owners.get(a.id) else "",
+            "bound_key_count": bound_counts.get(a.id, 0),
             "balance_total": a.balance_total,
             "balance_remain": a.balance_remain,
             "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,

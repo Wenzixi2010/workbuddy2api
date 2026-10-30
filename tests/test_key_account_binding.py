@@ -85,20 +85,28 @@ class OwnershipTests(Fixture, unittest.TestCase):
         with patch.object(proxy.POOL.sticky, "resolve", side_effect=lambda key, uids: "private" if "private" in uids else None):
             self.assertEqual(proxy._select_account(self.db, sticky_key="session").id, self.b.id)
 
-    def test_duplicate_uid_reserved_and_conflicts(self):
+    def test_duplicate_uid_and_shared_binding(self):
+        # 归属不变：被 Key 绑定的账号（含同 uid 镜像行）不进公共池
         dup = Account(uid=self.a.uid, auth_json="{}", balance_remain=999)
         self.db.add(dup)
         self.db.commit()
-        self.assertEqual([a.id for a in scope_accounts(self.db.query(Account)).all()], [self.b.id])
+        pool = [a.id for a in scope_accounts(self.db.query(Account)).all()]
+        self.assertNotIn(self.a.id, pool)
+        self.assertNotIn(dup.id, pool)
         self.assertEqual(binding_owners(self.db)[dup.id].id, self.private.id)
-        with self.assertRaises(HTTPException) as err:
-            keys.create_key(keys.KeyIn(account_id=dup.id), db=self.db)
-        self.assertEqual(err.exception.status_code, 409)
+        # 名额放开：第二把 Key 绑定同一账号不再 409
+        created = keys.create_key(keys.KeyIn(account_id=self.a.id), db=self.db)
+        self.assertIsNotNone(created["id"])
+        self.assertEqual(created["account_ids"], [self.a.id])
+        # 两把 Key 都能在该账号上选号
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=self.private.id).id, self.a.id)
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=created["id"]).id, self.a.id)
 
-    def test_revocation_keeps_reservation_and_unbind_releases(self):
+    def test_revocation_keeps_binding_and_unbind_restores_pool(self):
+        # 停用 Key 后：显式指定该账号 + 该 Key 仍不放行（Key 不活跃）
         keys.patch_key(self.private.id, {"status":"revoked"}, db=self.db)
-        self.assertEqual(proxy._select_account(self.db).id, self.b.id)
         self.assertIsNone(proxy._select_account(self.db, account_id=self.a.id, key_id=self.private.id))
+        # 解绑后该账号回到公共池，共享 Key 可以选到
         keys.patch_key(self.private.id, {"account_id":0}, db=self.db)
         self.assertEqual({a.id for a in scope_accounts(self.db.query(Account)).all()}, {self.a.id, self.b.id})
 
@@ -142,17 +150,11 @@ class OwnershipTests(Fixture, unittest.TestCase):
         self.assertEqual(err.exception.status_code, 503)
 
     def test_database_constraint_and_old_schema_migration(self):
-        # ⚠️ 唯一性语义已从「库级唯一索引」移到「应用层按 bind_mode 判定」：
-        # 新增的「限定账户」模式允许多个 Key 选中同一账号（账号不独占、仍在
-        # 公共池），库级唯一索引会把这种合法请求直接 IntegrityError 掉。
-        # 因此这里断言：**独占冲突由 validate_binding_multi 拒绝**（应用层），
-        # 而库级索引允许同账号被多个 Key 记录（限定模式所需）。
+        # 绑定名额从「一个账号至多一把 Key」放开为「不限把数」：
+        #   * 应用层 validate_binding_multi 不再判冲突，同一账号可被任意多把 Key 选中；
+        #   * 库级唯一索引必须降级，否则第二把 Key 绑定会直接 IntegrityError。
         from admin.account_binding import validate_binding_multi
-        with self.assertRaises(HTTPException) as err:
-            validate_binding_multi(self.db, [self.a.id], exclusive=True)
-        self.assertEqual(err.exception.status_code, 409)
-        # 限定模式不检查冲突 → 同一账号可以被任意多把 Key 选中
-        self.assertEqual(validate_binding_multi(self.db, [self.a.id], exclusive=False), [self.a.id])
+        self.assertEqual(validate_binding_multi(self.db, [self.a.id]), [self.a.id])
         self.db.rollback()
         self.db.close()
         with self.engine.begin() as conn:
@@ -162,7 +164,6 @@ class OwnershipTests(Fixture, unittest.TestCase):
             self.assertTrue(database.init_db())
             self.assertTrue(database.init_db())
         self.assertIn("account_id", [c["name"] for c in inspect(self.engine).get_columns("api_keys")])
-        self.assertIn("bind_mode", [c["name"] for c in inspect(self.engine).get_columns("api_keys")])
         # 旧的独占唯一索引必须被迁移降级为普通索引，否则限定账户模式会被库级约束挡住
         idx = {i["name"]: i for i in inspect(self.engine).get_indexes("api_keys")}
         self.assertIn("ix_api_keys_account", idx)
@@ -175,7 +176,10 @@ class OwnershipTests(Fixture, unittest.TestCase):
         app.dependency_overrides[get_db] = lambda: self.db
         async def exercise():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                self.assertEqual((await client.post("/api/keys", json={"account_id":self.a.id})).status_code, 409)
+                # 账号已被 self.private 绑定，但绑定不互斥 → 第二把 Key 也能绑
+                second = await client.post("/api/keys", json={"account_id":self.a.id})
+                self.assertEqual(second.status_code, 200)
+                self.assertEqual(second.json()["account_id"], self.a.id)
                 self.assertEqual((await client.post("/api/keys", json={"account_id":9999})).status_code, 400)
                 self.assertEqual((await client.patch(f"/api/keys/{self.public.id}", json={"account_id":"bad"})).status_code, 400)
                 created = await client.post("/api/keys", json={"account_id":self.b.id, "unlimited":True})

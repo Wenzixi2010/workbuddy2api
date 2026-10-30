@@ -116,8 +116,6 @@ def init_db() -> bool:
 
         # 迁移：给 api_keys 表加 key_full 列（若不存在）
         _ensure_column("api_keys", "key_full", "VARCHAR(2048)", "DEFAULT ''")
-        # 迁移：绑定模式（exclusive=独占 / restricted=限定账户，缺省=独占兼容老数据）
-        _ensure_column("api_keys", "bind_mode", "VARCHAR(16)", "DEFAULT 'exclusive'")
 
         # 迁移：给 model_configs 表补齐倍率相关列（旧实例可能缺）
         _ensure_column("model_configs", "credit_multiplier", "FLOAT", "DEFAULT 0")
@@ -187,11 +185,9 @@ def init_db() -> bool:
         _ensure_column("api_keys", "rate_per_minute", "INT", "NULL")
         # 迁移：把「一个账号只能属于一个 Key」的库级唯一索引降级为普通索引。
         #
-        # 为什么必须降级：新增的「限定账户」模式（bind_mode=restricted）允许
-        # 多个 Key 选中同一账号（账号不独占、仍在公共池）。旧唯一索引会让这种
-        # 合法请求直接 IntegrityError → 409「该账号已被其他 Key 独占绑定」。
-        # 独占语义改由应用层 `account_binding.validate_binding_multi` 判定
-        # （它已经在行锁内查冲突，语义完整）；库级索引只留作查询加速。
+        # 为什么必须降级：账号绑定已改为**不互斥** —— 多把 Key 可以绑定同一个
+        # 账号（各自独立消耗，账号仍留在公共池）。旧唯一索引会让这种合法请求
+        # 直接 IntegrityError。独占语义彻底取消，库级索引只留作查询加速。
         # 老库上必须先 DROP 旧唯一索引再建普通索引，否则唯一约束仍然生效。
         for _table, _old, _new in (
             ("api_keys", "ux_api_keys_account", "ix_api_keys_account"),
