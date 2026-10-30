@@ -142,8 +142,17 @@ class OwnershipTests(Fixture, unittest.TestCase):
         self.assertEqual(err.exception.status_code, 503)
 
     def test_database_constraint_and_old_schema_migration(self):
-        self.db.add(ApiKey(key_hash="race", account_id=self.a.id))
-        with self.assertRaises(IntegrityError): self.db.commit()
+        # ⚠️ 唯一性语义已从「库级唯一索引」移到「应用层按 bind_mode 判定」：
+        # 新增的「限定账户」模式允许多个 Key 选中同一账号（账号不独占、仍在
+        # 公共池），库级唯一索引会把这种合法请求直接 IntegrityError 掉。
+        # 因此这里断言：**独占冲突由 validate_binding_multi 拒绝**（应用层），
+        # 而库级索引允许同账号被多个 Key 记录（限定模式所需）。
+        from admin.account_binding import validate_binding_multi
+        with self.assertRaises(HTTPException) as err:
+            validate_binding_multi(self.db, [self.a.id], exclusive=True)
+        self.assertEqual(err.exception.status_code, 409)
+        # 限定模式不检查冲突 → 同一账号可以被任意多把 Key 选中
+        self.assertEqual(validate_binding_multi(self.db, [self.a.id], exclusive=False), [self.a.id])
         self.db.rollback()
         self.db.close()
         with self.engine.begin() as conn:
@@ -153,7 +162,11 @@ class OwnershipTests(Fixture, unittest.TestCase):
             self.assertTrue(database.init_db())
             self.assertTrue(database.init_db())
         self.assertIn("account_id", [c["name"] for c in inspect(self.engine).get_columns("api_keys")])
-        self.assertTrue(any(i["unique"] for i in inspect(self.engine).get_indexes("api_keys") if i["name"] == "ux_api_keys_account"))
+        self.assertIn("bind_mode", [c["name"] for c in inspect(self.engine).get_columns("api_keys")])
+        # 旧的独占唯一索引必须被迁移降级为普通索引，否则限定账户模式会被库级约束挡住
+        idx = {i["name"]: i for i in inspect(self.engine).get_indexes("api_keys")}
+        self.assertIn("ix_api_keys_account", idx)
+        self.assertFalse(idx.get("ux_api_keys_account", {}).get("unique", False))
 
     def test_management_http_contract(self):
         app = FastAPI()

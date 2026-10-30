@@ -116,6 +116,8 @@ def init_db() -> bool:
 
         # 迁移：给 api_keys 表加 key_full 列（若不存在）
         _ensure_column("api_keys", "key_full", "VARCHAR(2048)", "DEFAULT ''")
+        # 迁移：绑定模式（exclusive=独占 / restricted=限定账户，缺省=独占兼容老数据）
+        _ensure_column("api_keys", "bind_mode", "VARCHAR(16)", "DEFAULT 'exclusive'")
 
         # 迁移：给 model_configs 表补齐倍率相关列（旧实例可能缺）
         _ensure_column("model_configs", "credit_multiplier", "FLOAT", "DEFAULT 0")
@@ -183,13 +185,24 @@ def init_db() -> bool:
         # 迁移：api_keys 加 max_concurrent（NULL=全局；0=不限；N=N 路并发）
         _ensure_column("api_keys", "max_concurrent", "INT", "NULL")
         _ensure_column("api_keys", "rate_per_minute", "INT", "NULL")
-        # Ownership must have a database constraint, including concurrent creates.
-        next(i for i in models.ApiKey.__table__.indexes
-             if i.name == "ux_api_keys_account").create(bind=engine, checkfirst=True)
-        # 单 Key 独占多账号：api_key_accounts 表 + 账号唯一约束（create_all 建表，
-        # 老库需要在这里幂等补索引，语义同 ux_api_keys_account）。
-        next(i for i in models.ApiKeyAccount.__table__.indexes
-             if i.name == "ux_api_key_accounts_account").create(bind=engine, checkfirst=True)
+        # 迁移：把「一个账号只能属于一个 Key」的库级唯一索引降级为普通索引。
+        #
+        # 为什么必须降级：新增的「限定账户」模式（bind_mode=restricted）允许
+        # 多个 Key 选中同一账号（账号不独占、仍在公共池）。旧唯一索引会让这种
+        # 合法请求直接 IntegrityError → 409「该账号已被其他 Key 独占绑定」。
+        # 独占语义改由应用层 `account_binding.validate_binding_multi` 判定
+        # （它已经在行锁内查冲突，语义完整）；库级索引只留作查询加速。
+        # 老库上必须先 DROP 旧唯一索引再建普通索引，否则唯一约束仍然生效。
+        for _table, _old, _new in (
+            ("api_keys", "ux_api_keys_account", "ix_api_keys_account"),
+            ("api_key_accounts", "ux_api_key_accounts_account", "ux_api_key_accounts_pair"),
+        ):
+            _drop_index(_table, _old)
+        _ensure_index("api_keys", "ix_api_keys_account", ("account_id",))
+        # 同一 Key 内不重复绑定同一账号（key_id, account_id 唯一）——
+        # 这个约束仍然成立，且不会影响多 Key 共享同一账号。
+        _ensure_index("api_key_accounts", "ux_api_key_accounts_pair",
+                      ("key_id", "account_id"), unique=True)
 
         # 迁移：使用记录/日志的查询索引。
         #
@@ -251,7 +264,7 @@ def _ensure_column(table: str, col: str, col_type: str, default: str = ""):
         pass  # 非 MySQL 或权限不足时静默跳过
 
 
-def _ensure_index(table: str, index: str, columns: tuple[str, ...]) -> bool:
+def _ensure_index(table: str, index: str, columns: tuple[str, ...], unique: bool = False) -> bool:
     """确保复合索引存在（幂等）。返回 True 表示本次新建。
 
     为什么必须显式建：`Base.metadata.create_all()` 对**已存在**的表不做任何事，
@@ -264,10 +277,11 @@ def _ensure_index(table: str, index: str, columns: tuple[str, ...]) -> bool:
     if not columns:
         return False
     try:
+        uniq = "UNIQUE " if unique else ""
         if engine.dialect.name == "sqlite":
             with engine.begin() as conn:
                 cols = ", ".join(f'"{_safe_ident(c)}"' for c in columns)
-                conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{_safe_ident(index)}" '
+                conn.execute(text(f'CREATE {uniq}INDEX IF NOT EXISTS "{_safe_ident(index)}" '
                                   f'ON "{_safe_ident(table)}" ({cols})'))
             return True
         with engine.connect() as conn:
@@ -282,7 +296,7 @@ def _ensure_index(table: str, index: str, columns: tuple[str, ...]) -> bool:
                 return False
             cols = ", ".join(f"`{_safe_ident(c)}`" for c in columns)
             conn.execute(
-                text(f"CREATE INDEX `{_safe_ident(index)}` "
+                text(f"CREATE {uniq}INDEX `{_safe_ident(index)}` "
                      f"ON `{_safe_ident(table)}` ({cols})")
             )
             conn.commit()
@@ -291,4 +305,24 @@ def _ensure_index(table: str, index: str, columns: tuple[str, ...]) -> bool:
     except Exception as e:
         # 权限不足 / 方言不支持 / 并发建索引冲突：都不该让服务启动失败
         logger.warning("创建索引 %s 失败（不影响启动）：%s", index, e)
+        return False
+
+
+def _drop_index(table: str, index: str) -> bool:
+    """幂等删除索引（用于把旧的库级唯一索引降级为普通索引）。
+
+    只删**已知的、由本仓库迁移创建的**索引名（`_safe_ident` 白名单校验），
+    不会碰任何用户自建索引。删不掉（不存在 / 权限不足）一律静默跳过：
+    这是迁移的加速项，不是启动的前置条件。
+    """
+    try:
+        if engine.dialect.name == "sqlite":
+            with engine.begin() as conn:
+                conn.execute(text(f'DROP INDEX IF EXISTS "{_safe_ident(index)}"'))
+            return True
+        with engine.connect() as conn:
+            conn.execute(text(f"DROP INDEX `{_safe_ident(index)}` ON `{_safe_ident(table)}`"))
+            conn.commit()
+            return True
+    except Exception:
         return False

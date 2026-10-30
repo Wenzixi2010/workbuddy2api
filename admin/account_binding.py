@@ -10,6 +10,15 @@ from sqlalchemy.orm import aliased
 from admin.models import Account, ApiKey, ApiKeyAccount
 
 
+def _is_exclusive(key_col):
+    """SQL 侧「该 Key 是独占模式」的条件。
+
+    历史数据 bind_mode 可能为 NULL（老库）或空串 —— 都按 exclusive 处理，
+    保证升级后老 Key 的独占语义**一字不变**（公共池照旧跳过它们的绑定账号）。
+    """
+    return or_(key_col.bind_mode.is_(None), key_col.bind_mode != "restricted")
+
+
 def scope_accounts(query, account_id=None, key_id=None):
     """Apply ownership before health, sticky routing or fallback selection.
 
@@ -54,6 +63,7 @@ def scope_accounts(query, account_id=None, key_id=None):
     legacy_owned = select(ApiKey.id).select_from(ApiKey).outerjoin(
         reserved, reserved.id == ApiKey.account_id).where(
             ApiKey.status == "active",
+            _is_exclusive(ApiKey),
             ApiKey.account_id.is_not(None),
             or_(ApiKey.account_id == Account.id,
                 (reserved.uid != "") & (reserved.uid == Account.uid))).exists()
@@ -69,6 +79,7 @@ def scope_accounts(query, account_id=None, key_id=None):
         ApiKey, ApiKey.id == ApiKeyAccount.key_id).outerjoin(
         reserved_multi, reserved_multi.id == ApiKeyAccount.account_id).where(
         ApiKey.status == "active",
+        _is_exclusive(ApiKey),
         or_(ApiKeyAccount.account_id == Account.id,
             (reserved_multi.uid != "") & (reserved_multi.uid == Account.uid))).exists()
     return query.filter(~legacy_owned, ~multi_owned)
@@ -100,27 +111,28 @@ def _conflicting_keys(db, account_ids, exclude_key_id=None):
     peer_ids = [a.id for a in peers]
     peer_uids = [a.uid for a in peers if a.uid]
     conflict_keys = set()
-    if peer_ids:
-        legacy = db.query(ApiKey).filter(ApiKey.account_id.in_(peer_ids))
-        if exclude_key_id:
-            legacy = legacy.filter(ApiKey.id != exclude_key_id)
-        conflict_keys |= {k.id for k in legacy.with_for_update().all()}
-        multi = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(peer_ids))
-        if exclude_key_id:
-            multi = multi.filter(ApiKeyAccount.key_id != exclude_key_id)
-        conflict_keys |= {m.key_id for m in multi.with_for_update().all()}
+    # 查询范围：目标账号本身 + 同 uid 的镜像记录（重复导入会产生多行同 uid）
+    all_ids = list(peer_ids)
     if peer_uids:
-        extra_ids = [a.id for a in db.query(Account).filter(
+        all_ids += [a.id for a in db.query(Account).filter(
             Account.uid.in_(peer_uids), ~Account.id.in_(peer_ids)).all()]
-        if extra_ids:
-            legacy = db.query(ApiKey).filter(ApiKey.account_id.in_(extra_ids))
-            if exclude_key_id:
-                legacy = legacy.filter(ApiKey.id != exclude_key_id)
-            conflict_keys |= {k.id for k in legacy.with_for_update().all()}
-            multi = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(extra_ids))
-            if exclude_key_id:
-                multi = multi.filter(ApiKeyAccount.key_id != exclude_key_id)
-            conflict_keys |= {m.key_id for m in multi.with_for_update().all()}
+    all_ids = sorted(set(all_ids))
+    if not all_ids:
+        return conflict_keys
+    # 只有**独占** Key 才占用账号；限定账户 Key 不占用（不构成冲突）。
+    # `_is_exclusive` 把 bind_mode 为 NULL/空串的历史数据按独占处理，
+    # 保证升级后老 Key 的独占语义不变。
+    legacy = db.query(ApiKey).filter(
+        ApiKey.account_id.in_(all_ids), _is_exclusive(ApiKey))
+    if exclude_key_id:
+        legacy = legacy.filter(ApiKey.id != exclude_key_id)
+    conflict_keys |= {k.id for k in legacy.with_for_update().all()}
+    multi = db.query(ApiKeyAccount).join(
+        ApiKey, ApiKey.id == ApiKeyAccount.key_id).filter(
+        ApiKeyAccount.account_id.in_(all_ids), _is_exclusive(ApiKey))
+    if exclude_key_id:
+        multi = multi.filter(ApiKeyAccount.key_id != exclude_key_id)
+    conflict_keys |= {m.key_id for m in multi.with_for_update().all()}
     return conflict_keys
 
 
@@ -130,13 +142,15 @@ def validate_binding(db, account_id, key_id=None):
     return ids[0] if ids else None
 
 
-def validate_binding_multi(db, account_ids, key_id=None):
-    """校验并返回一个 Key 可以独占的账号 id 列表。
+def validate_binding_multi(db, account_ids, key_id=None, exclusive=True):
+    """校验并返回一个 Key 可以绑定的账号 id 列表。
 
     规则：
       * 空列表 / [0] / [None] → 不绑定（清空全部绑定）；
       * 每个账号必须存在；
-      * 账号不能已被其他 Key 独占（主绑定或关联绑定，含同 uid 镜像记录）；
+      * exclusive=True：账号不能已被其他 Key 独占（主绑定或关联绑定，含同 uid 镜像）；
+      * exclusive=False（限定账户模式）：只校验存在性，不占用账号 ——
+        同一账号可以被多个限定 Key 选中，也仍留在公共池；
       * 全程行锁（with_for_update）串行化并发绑定。
     """
     if account_ids is None:
@@ -162,49 +176,30 @@ def validate_binding_multi(db, account_ids, key_id=None):
     missing = [aid for aid in cleaned if aid not in found]
     if missing:
         raise HTTPException(400, f"账号 #{missing[0]} 不存在")
-    peers = db.query(Account).filter(
-        or_(Account.id.in_(cleaned),
-            (Account.uid != "") & Account.uid.in_(
-                db.query(Account.uid).filter(Account.id.in_(cleaned)).scalar_subquery()))
-    ).order_by(Account.id).with_for_update().all()
-    peer_ids = [a.id for a in peers]
-    peer_uids = [a.uid for a in peers if a.uid]
-    conflict = db.query(ApiKey).filter(ApiKey.account_id.in_(peer_ids))
-    if key_id:
-        conflict = conflict.filter(ApiKey.id != key_id)
-    hit = conflict.with_for_update().first()
-    if not hit and peer_ids:
-        multi = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(peer_ids))
-        if key_id:
-            multi = multi.filter(ApiKeyAccount.key_id != key_id)
-        hit_row = multi.with_for_update().first()
-        if hit_row:
-            hit = db.query(ApiKey).filter(ApiKey.id == hit_row.key_id).first()
-    if not hit and peer_uids:
-        extra_ids = [a.id for a in db.query(Account).filter(
-            Account.uid.in_(peer_uids), ~Account.id.in_(peer_ids)).all()]
-        if extra_ids:
-            legacy2 = db.query(ApiKey).filter(ApiKey.account_id.in_(extra_ids))
-            if key_id:
-                legacy2 = legacy2.filter(ApiKey.id != key_id)
-            hit = legacy2.with_for_update().first()
-            if not hit:
-                multi2 = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(extra_ids))
-                if key_id:
-                    multi2 = multi2.filter(ApiKeyAccount.key_id != key_id)
-                row2 = multi2.with_for_update().first()
-                if row2:
-                    hit = db.query(ApiKey).filter(ApiKey.id == row2.key_id).first()
-    if hit:
-        raise HTTPException(409, f"账号已被其他 API Key（#{hit.id}）独占绑定，请先解除原绑定")
+    if not exclusive:
+        # 限定账户模式：不查独占冲突（账号允许被多个 Key 共享选中）
+        return cleaned
+    # 独占冲突判定统一走 `_conflicting_keys`（它按 `_is_exclusive` 过滤，
+    # 只把**独占** Key 视为占用；限定 Key 的绑定不占账号）。
+    # 这里曾内联过一份旧逻辑，没有按 bind_mode 过滤，导致限定 Key 选中的账号
+    # 被误判为「已被独占」，独占 Key 反而拿不到该账号。
+    conflicts = _conflicting_keys(db, cleaned, exclude_key_id=key_id)
+    if conflicts:
+        raise HTTPException(
+            409, f"账号已被其他 API Key（#{sorted(conflicts)[0]}）独占绑定，请先解除原绑定")
     return cleaned
 
 
-def sync_key_bindings(db, key_id, account_ids):
-    """把 Key 的绑定集合同步为 account_ids：account_id 存第一个，其余进关联表。"""
-    ids = validate_binding_multi(db, account_ids, key_id)
-    primary = ids[0] if ids else None
-    rest = ids[1:]
+def sync_key_bindings(db, key_id, account_ids, exclusive=True):
+    """把 Key 的绑定集合同步为 account_ids。
+
+    独占模式：第一个账号写主绑定 `account_id`，其余进关联表（兼容老数据与
+    既有查询）。限定账户模式：**主绑定一律留空，全部走关联表** —— 主绑定
+    语义上代表「独占占用」，限定 Key 不该占用账号。
+    """
+    ids = validate_binding_multi(db, account_ids, key_id, exclusive=exclusive)
+    primary = ids[0] if (ids and exclusive) else None
+    rest = ids[1:] if exclusive else list(ids)
     key = db.query(ApiKey).filter(ApiKey.id == key_id).with_for_update().first()
     if key is None:
         raise HTTPException(404, "API Key 不存在")

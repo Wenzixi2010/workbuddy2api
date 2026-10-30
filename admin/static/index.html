@@ -4408,7 +4408,12 @@ async function submitAddAccount(){
 function keyRow(k) {
   return `
     <tr class="border-t hover:bg-slate-50">
-      <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${(k.account_ids && k.account_ids.length > 1) ? `独占账号（${k.account_ids.length} 个）：${esc((k.account_names || []).join("、"))}` : k.account_id ? `独占账号：${esc(k.account_name || ("#" + k.account_id))}` : "公共账号池"}</div></td>
+      <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${(() => {
+        const md = k.bind_mode === "restricted" ? "限定账户" : "独占账号";
+        if (k.account_ids && k.account_ids.length > 1) return `${md}（${k.account_ids.length} 个）：${esc((k.account_names || []).join("、"))}`;
+        if (k.account_id) return `${md}：${esc(k.account_name || ("#" + k.account_id))}`;
+        return "公共账号池";
+      })()}</div></td>
       <td class="px-4 py-3 font-mono text-xs text-slate-500">${esc(k.masked)}</td>
       <td class="px-4 py-3">${k.unlimited?"∞":k.credit_limit}</td>
       <td class="px-4 py-3 ${k.credit_used>=k.credit_limit&&!k.unlimited?'text-red-500':''}">${k.credit_used}</td>
@@ -4527,21 +4532,50 @@ async function keyAccountOptions(key) {
     options.push({ value: String(key.account_id), label: `原绑定账号 #${key.account_id}（不存在）` });
   return options;
 }
-function keyAccountSelect(id, options, value = 0, selectedIds = null) {
+function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode = "exclusive") {
   // 单 Key 独占多账号：渲染成勾选列表。selectedIds 传数组时用多选形态；
   // 不传（旧调用）时退化为原来的单选下拉。
+  // 绑定模式：独占（exclusive）/ 限定账户（restricted）—— 按钮切换，不用下拉框。
   if (Array.isArray(selectedIds)) {
+    const restricted = bindMode === "restricted";
     const boxes = options.filter(o => o.value !== "0").map(o =>
       `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} /> <span>${esc(o.label)}</span></label>`
     ).join("") || `<p class="text-xs text-slate-400">暂无可绑定账号</p>`;
-    return `<div class="mb-3"><label class="text-xs text-slate-500">独占绑定账号（可多选）</label>
+    return `<div class="mb-3">
+      <label class="text-xs text-slate-500">账号模式</label>
+      <div class="flex gap-2 mt-1 mb-2">
+        <button type="button" id="${id}ModeExclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${restricted ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">独占</button>
+        <button type="button" id="${id}ModeRestricted" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${restricted ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','restricted')">限定账户</button>
+      </div>
+      <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${restricted
+        ? "限定账户：此 Key 只在勾选的账号里选号（用它们的积分），但这些账号**不独占** —— 仍留在公共池可被其它 Key 使用，多个 Key 可选中同一账号。"
+        : "独占：此 Key 独占勾选的账号并在其间轮换，公共池跳过它们。停用 Key 保留绑定，解绑或删除 Key 释放账号。"}</div>
       <div id="${id}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
       <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
-      <p class="text-[11px] text-slate-400 mt-1">可勾选多个账号：此 Key 独占这些账号并在其间轮换，公共池跳过它们。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
+    </div>`;
   }
   return `<div class="mb-3"><label class="text-xs text-slate-500">独占绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
     <p class="text-[11px] text-slate-400 mt-1">绑定后公共池跳过该账号；此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。停用 Key 保留绑定，解绑或删除 Key 释放账号。</p></div>`;
+}
+// 绑定模式切换：只切按钮样式 + 提示文案，勾选状态保留（切模式不丢选择）
+function setKeyBindMode(id, mode) {
+  const wrap = document.getElementById(id + "ModeExclusive")?.parentElement?.parentElement;
+  if (!wrap) return;
+  wrap.dataset.bindMode = mode;
+  const ex = document.getElementById(id + "ModeExclusive");
+  const rs = document.getElementById(id + "ModeRestricted");
+  [ex, rs].forEach(b => { if (b) b.classList.remove("btn-primary", "text-white"); });
+  const active = mode === "restricted" ? rs : ex;
+  if (active) active.classList.add("btn-primary", "text-white");
+  const hint = document.getElementById(id + "ModeHint");
+  if (hint) hint.innerHTML = mode === "restricted"
+    ? "限定账户：此 Key 只在勾选的账号里选号（用它们的积分），但这些账号<b>不独占</b> —— 仍留在公共池可被其它 Key 使用，多个 Key 可选中同一账号。"
+    : "独占：此 Key 独占勾选的账号并在其间轮换，公共池跳过它们。停用 Key 保留绑定，解绑或删除 Key 释放账号。";
+}
+function keyBindMode(id) {
+  const wrap = document.getElementById(id + "ModeExclusive")?.parentElement?.parentElement;
+  return wrap?.dataset.bindMode === "restricted" ? "restricted" : "exclusive";
 }
 function keyAccountIds(id) {
   if (document.getElementById(id + "None")?.checked) return [];
@@ -4577,7 +4611,7 @@ async function openAddKey(){
       })}</div>
       <p class="text-[11px] text-slate-400 mt-1">选择后该 Key 只能调用组内模型，调用组外模型返回 403。</p>
     </div>
-    ${keyAccountSelect("kAccount", accountOptions, 0, [])}
+    ${keyAccountSelect("kAccount", accountOptions, 0, [], "exclusive")}
     <input id="kNote" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="备注（可选）" />
     <div class="flex justify-end gap-2 mt-2">
       <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
@@ -4588,7 +4622,7 @@ async function submitAddKey(){
   const unlimited = $("#kUnlimited").checked || $("#kLimit").value.trim() === "";
   const mcRaw = $("#kMaxConcurrent").value;
   const rpmRaw = $("#kRatePerMinute").value;
-  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_ids: keyAccountIds("kAccount"),
+  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_ids: keyAccountIds("kAccount"), bind_mode: keyBindMode("kAccount"),
     max_concurrent: mcRaw === "" ? null : Number(mcRaw), rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw) };
   const r = await api("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d = await r.json().catch(()=>({}));
@@ -4659,7 +4693,7 @@ async function editKey(id){
     })}</div>
     <p class="text-[11px] text-slate-400 -mt-2 mb-3">不限制 = 可用全部启用模型；选了分组则只能调用组内模型。</p>
 
-    ${keyAccountSelect("ekAccount", accountOptions, k.account_id || 0, k.account_ids || (k.account_id ? [k.account_id] : []))}
+    ${keyAccountSelect("ekAccount", accountOptions, k.account_id || 0, k.account_ids || (k.account_id ? [k.account_id] : []), k.bind_mode || "exclusive")}
     <label class="block text-xs text-slate-500 mb-1">积分限额（credits）</label>
     <input id="ekLimit" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm" value="${k.unlimited ? "" : k.credit_limit}" placeholder="留空不限额；填写 0 表示零额度" oninput="document.getElementById('ekUnlimited').checked=this.value.trim()===''" />
     <label class="flex items-center gap-2 text-sm mb-1"><input id="ekUnlimited" type="checkbox" onchange="if(this.checked) document.getElementById('ekLimit').value=''" ${k.unlimited ? "checked" : ""} /> 不限额（∞）</label>
@@ -4684,7 +4718,7 @@ async function submitEditKey(id){
   const body = {
     name,
     group_id: Number(uiSelectValue("ekGroup") || 0),
-    account_ids: keyAccountIds("ekAccount"),
+    account_ids: keyAccountIds("ekAccount"), bind_mode: keyBindMode("ekAccount"),
     credit_limit: Number($("#ekLimit").value || 0),
     unlimited: $("#ekUnlimited").checked || $("#ekLimit").value.trim() === "",
     max_concurrent: mcRaw === "" ? null : Number(mcRaw),

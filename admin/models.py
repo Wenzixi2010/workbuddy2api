@@ -107,7 +107,10 @@ class ApiKey(Base):
     """对外共享的 API Key，带积分限额。"""
 
     __tablename__ = "api_keys"
-    __table_args__ = (Index("ux_api_keys_account", "account_id", unique=True),)
+    # 账号占用唯一性**不再由库级唯一索引保证**（见 bind_mode 注释）：
+    # 限定账户模式允许多个 Key 选中同一账号，唯一索引会直接 409 掉合法请求。
+    # 独占语义改由应用层 `account_binding.validate_binding_multi` 判定。
+    __table_args__ = (Index("ix_api_keys_account", "account_id"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(120), default="")
@@ -128,21 +131,30 @@ class ApiKey(Base):
     group_id = Column(Integer, default=0)
     # NULL = public pool; a reservation survives revocation until explicitly released.
     account_id = Column(Integer, nullable=True, default=None)
+    # 绑定模式：exclusive = 独占（现状，绑定账号被此 Key 独享、公共池跳过）；
+    # restricted = 限定账户（此 Key 只在绑定账号集合内选号，但账号**不独占**，
+    # 仍留在公共池可被共享 Key 使用）。空/缺省按 exclusive 处理。
+    bind_mode = Column(String(16), default="exclusive")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ApiKeyAccount(Base):
-    """API Key 的额外独占账号绑定（单 Key 独占多账号）。
+    """API Key 的账号绑定（多账号 / 限定账户）。
 
     ApiKey.account_id 保留为「主绑定」（兼容老数据与既有查询），
-    本表存同一 Key 的其余独占账号。一个账号同时只能被一个 Key 独占：
-    account_id 上有唯一索引（ux_api_key_accounts_account），并发创建由
-    数据库约束兜底，语义与 ux_api_keys_account 一致。
+    本表存同一 Key 的其余绑定账号。
+
+    唯一性语义按 Key 的 `bind_mode` 分两种：
+      * exclusive（独占）：一个账号同时只能被一个 Key 独占 —— 由应用层
+        `account_binding.validate_binding_multi` 判定，不再用库级唯一索引
+        （限定账户允许多 Key 选中同一账号，唯一索引会把合法请求 409 掉）。
+      * restricted（限定账户）：同一账号可被多个 Key 选中，账号仍留在公共池。
+    同一 Key 内不会重复绑定同一账号（本表 (key_id, account_id) 唯一）。
     """
 
     __tablename__ = "api_key_accounts"
-    __table_args__ = (Index("ux_api_key_accounts_account", "account_id", unique=True),)
+    __table_args__ = (Index("ux_api_key_accounts_pair", "key_id", "account_id", unique=True),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     key_id = Column(Integer, nullable=False, index=True)

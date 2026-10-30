@@ -24,6 +24,9 @@ class KeyIn(BaseModel):
     account_id: int | None = None  # 0 / NULL = 公共池（单账号主绑定，兼容老客户端）
     # 单 Key 独占多账号：完整绑定集合（含主绑定）。缺省 = 只用 account_id。
     account_ids: list[int] | None = None
+    # 绑定模式：exclusive（独占，默认）/ restricted（限定账户 —— Key 只在选中
+    # 账号内选号，但不独占它们：账号仍留在公共池、可被多个 Key 同时选中）。
+    bind_mode: str | None = None
     # 该 Key 并发上限：None=跟随全局；0=不限；N=最多 N 路在途
     max_concurrent: int | None = None
     rate_per_minute: int | None = None
@@ -75,6 +78,8 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
             "group_name": group_names.get(int(k.group_id or 0), ""),
             "account_id": k.account_id,
             "account_name": account_names.get(k.account_id, ""),
+            # 绑定模式：老数据 bind_mode 为空 → 按独占（exclusive）返回
+            "bind_mode": ("restricted" if (k.bind_mode == "restricted") else "exclusive"),
             # 单 Key 独占多账号：完整绑定集合（主绑定在前）+ 可读名称列表
             "account_ids": ([int(k.account_id)] if k.account_id else [])
                            + [aid for aid in multi.get(k.id, []) if aid != k.account_id],
@@ -114,7 +119,17 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
     # 单 Key 独占多账号：优先用 account_ids（完整集合）；缺省退回单账号 account_id。
     account_ids = body.account_ids if body.account_ids is not None else (
         [body.account_id] if body.account_id else [])
-    ids = validate_binding_multi(db, account_ids)
+    # 限定账户模式只锁「用哪些号」，不占用账号：跳过独占冲突校验
+    mode = "restricted" if body.bind_mode == "restricted" else "exclusive"
+    ids = validate_binding_multi(db, account_ids, exclusive=(mode == "exclusive"))
+    # 限定账户模式：只用关联表记录「选中了哪些号」，主绑定 `account_id` 留空。
+    #
+    # 为什么必须留空：`api_keys.account_id` 历史上带唯一索引（老的独占语义库级
+    # 兜底），老库升级后仍可能存在；即便索引已降级，独占 Key 的主绑定与限定 Key
+    # 的主绑定指向同一账号也会让 `_conflicting_keys` 的语义变浑。统一约定：
+    # **主绑定只属于独占模式**，限定模式只用关联表 —— 读取侧
+    # （scope_accounts / _bound_account_ids / list_keys）都是两种来源的并集。
+    primary = ids[0] if (ids and mode == "exclusive") else None
     k = ApiKey(
         name=body.name or "未命名",
         key_hash=hash_key(raw),
@@ -126,14 +141,15 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         rate_per_minute=_normalize_max_concurrent(body.rate_per_minute),
         note=body.note,
         group_id=gid,
-        account_id=ids[0] if ids else None,
+        account_id=primary,
+        bind_mode=mode,
     )
     db.add(k)
     _commit_key(db)
     db.refresh(k)
-    if len(ids) > 1:
+    if ids and (len(ids) > 1 or mode == "restricted"):
         from admin.account_binding import sync_key_bindings
-        sync_key_bindings(db, k.id, ids)
+        sync_key_bindings(db, k.id, ids, exclusive=(mode == "exclusive"))
     # 明文 key 仅此返回一次
     return {
         "id": k.id,
@@ -147,6 +163,7 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         "group_id": int(k.group_id or 0),
         "account_id": k.account_id,
         "account_ids": ids,
+        "bind_mode": mode,
     }
 
 
@@ -193,13 +210,19 @@ def patch_key(key_id: int, body: dict, _: bool = Depends(require_admin), db: Ses
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
+    if "bind_mode" in body and body["bind_mode"] in ("exclusive", "restricted"):
+        k.bind_mode = body["bind_mode"]
     if "account_ids" in body or "account_id" in body:
         # 单 Key 独占多账号：account_ids（完整集合）优先；缺省退回单账号语义。
+        # 限定账户模式下不校验独占冲突（账号允许被多个 Key 选中）。
+        exclusive = (k.bind_mode != "restricted")
         if "account_ids" in body and body["account_ids"] is not None:
-            sync_key_bindings(db, key_id, body["account_ids"])
+            sync_key_bindings(db, key_id, body["account_ids"], exclusive=exclusive)
             db.refresh(k)
         else:
-            k.account_id = validate_binding(db, body["account_id"], key_id)
+            from admin.account_binding import validate_binding_multi
+            ids = validate_binding_multi(db, [body["account_id"]], key_id, exclusive=exclusive)
+            k.account_id = ids[0] if ids else None
     if "name" in body:
         k.name = body["name"]
     if "credit_limit" in body:
