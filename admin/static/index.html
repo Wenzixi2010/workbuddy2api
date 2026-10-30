@@ -4565,13 +4565,16 @@ function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode =
     }).join("") || `<p class="text-xs text-slate-400">暂无账号</p>`;
     return `<div class="mb-3">
       <label class="text-xs text-slate-500">绑定方式</label>
-      <div class="mt-1 mb-2">${switchHTML(id + "Mode", !shared, `setKeyBindMode('${id}', this.checked ? 'exclusive' : 'whitelist')`, "专属锁定", "白名单")}</div>
+      <div class="flex gap-2 mt-1 mb-2">
+        <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">专属锁定</button>
+        <button type="button" id="${id}ModeShared" data-mode="whitelist" class="px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','whitelist')">白名单</button>
+      </div>
       <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${shared
         ? "白名单：只限制本 Key 只能用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
         : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
       <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5 ${usePool ? "opacity-50 pointer-events-none" : ""}" style="border-color:var(--border)">${boxes}</div>
       <div class="flex items-center gap-2 mt-2">${switchHTML(id + "Pool", usePool, `toggleKeyPool('${id}', this.checked)`, "不使用公共池", "使用公共账号池")}</div>
-      <p class="text-[11px] text-slate-400 mt-1">选中任意账号会自动关闭「使用公共账号池」；打开公共池会清空已选账号。专属锁定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
+      <p class="text-[11px] text-slate-400 mt-1">勾选任意账号会自动关闭「使用公共账号池」；打开公共池会清空已选账号。专属锁定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
   }
   return `<div class="mb-3"><label class="text-xs text-slate-500">绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
@@ -4629,11 +4632,15 @@ function syncSwitchStyle(input) {
   }
 }
 // 切换绑定方式：只改样式与提示，保留已勾选项（切模式不丢选择）
-function setKeyBindMode(id, exclusive) {
+function setKeyBindMode(id, mode) {
   const wrap = document.getElementById(id);
   if (!wrap) return;
-  const mode = exclusive ? "exclusive" : "whitelist";
-  wrap.dataset.bindMode = mode;
+  wrap.dataset.bindMode = mode === "whitelist" ? "whitelist" : "exclusive";
+  const ex = document.getElementById(id + "ModeExclusive");
+  const wl = document.getElementById(id + "ModeShared");
+  [ex, wl].forEach(b => { if (b) b.classList.remove("btn-primary", "text-white"); });
+  const active = wrap.dataset.bindMode === "whitelist" ? wl : ex;
+  if (active) active.classList.add("btn-primary", "text-white");
   // 选了绑定方式 = 要用专属账号 → 自动关闭「使用公共账号池」
   const pool = document.getElementById(id + "Pool");
   if (pool && pool.checked) {
@@ -4642,7 +4649,7 @@ function setKeyBindMode(id, exclusive) {
     wrap.classList.remove("opacity-50", "pointer-events-none");
   }
   const hint = document.getElementById(id + "ModeHint");
-  if (hint) hint.innerHTML = mode === "whitelist"
+  if (hint) hint.innerHTML = wrap.dataset.bindMode === "whitelist"
     ? "白名单：只限制本 Key 只能用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
     : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。";
 }
