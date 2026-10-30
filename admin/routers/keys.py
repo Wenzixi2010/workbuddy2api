@@ -24,6 +24,8 @@ class KeyIn(BaseModel):
     account_id: int | None = None  # 0 / NULL = 公共池（单账号主绑定，兼容老客户端）
     # 单 Key 绑定多账号：完整绑定集合（含主绑定）。缺省 = 只用 account_id。
     account_ids: list[int] | None = None
+    # 绑定方式：exclusive（独占，选中即抢占他人绑定）/ shared（共享，多 Key 共存）
+    bind_mode: str | None = None
     # 该 Key 并发上限：None=跟随全局；0=不限；N=最多 N 路在途
     max_concurrent: int | None = None
     rate_per_minute: int | None = None
@@ -76,6 +78,7 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
             "account_id": k.account_id,
             "account_name": account_names.get(k.account_id, ""),
             # 单 Key 绑定多账号：完整绑定集合（主绑定在前）+ 可读名称列表
+            "bind_mode": ("shared" if (k.bind_mode == "shared") else "exclusive"),
             "account_ids": ([int(k.account_id)] if k.account_id else [])
                            + [aid for aid in multi.get(k.id, []) if aid != k.account_id],
             "account_names": [account_names.get(aid, f"#{aid}")
@@ -114,7 +117,8 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
     # 单 Key 绑定多账号：优先用 account_ids（完整集合）；缺省退回单账号 account_id。
     account_ids = body.account_ids if body.account_ids is not None else (
         [body.account_id] if body.account_id else [])
-    # 绑定不互斥：多把 Key 可以指向同一账号，各自独立消耗
+    # bind_mode：exclusive=独占（选中即抢占其它 Key 的绑定）/ shared=共享（共存）
+    mode = "shared" if body.bind_mode == "shared" else "exclusive"
     ids = validate_binding_multi(db, account_ids)
     # 主绑定写第一个账号（兼容老查询），其余进关联表。
     primary = ids[0] if ids else None
@@ -130,13 +134,17 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         note=body.note,
         group_id=gid,
         account_id=primary,
+        bind_mode=mode,
     )
     db.add(k)
     _commit_key(db)
     db.refresh(k)
-    if len(ids) > 1:
+    released = []
+    if ids:
         from admin.account_binding import sync_key_bindings
-        sync_key_bindings(db, k.id, ids)
+        _, released = sync_key_bindings(db, k.id, ids, bind_mode=mode)
+        _commit_key(db)
+        db.refresh(k)
     # 明文 key 仅此返回一次
     return {
         "id": k.id,
@@ -150,6 +158,8 @@ def create_key(body: KeyIn, _: bool = Depends(require_admin), db: Session = Depe
         "group_id": int(k.group_id or 0),
         "account_id": k.account_id,
         "account_ids": ids,
+        "bind_mode": mode,
+        "released": [{"key_id": kid, "account_id": aid} for kid, aid in released],
     }
 
 
@@ -196,15 +206,15 @@ def patch_key(key_id: int, body: dict, _: bool = Depends(require_admin), db: Ses
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
+    if "bind_mode" in body and body["bind_mode"] in ("exclusive", "shared"):
+        k.bind_mode = body["bind_mode"]
     if "account_ids" in body or "account_id" in body:
         # 单 Key 多账号：account_ids（完整集合）优先；缺省退回单账号语义。
-        if "account_ids" in body and body["account_ids"] is not None:
-            sync_key_bindings(db, key_id, body["account_ids"])
-            db.refresh(k)
-        else:
-            from admin.account_binding import validate_binding_multi
-            ids = validate_binding_multi(db, [body["account_id"]], key_id)
-            k.account_id = ids[0] if ids else None
+        mode = "shared" if (k.bind_mode == "shared") else "exclusive"
+        target = (body["account_ids"] if "account_ids" in body
+                  and body["account_ids"] is not None else [body["account_id"]])
+        sync_key_bindings(db, key_id, target, bind_mode=mode)
+        db.refresh(k)
     if "name" in body:
         k.name = body["name"]
     if "credit_limit" in body:

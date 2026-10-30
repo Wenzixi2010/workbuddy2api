@@ -4525,28 +4525,78 @@ async function keyAccountOptions(key) {
   const r = await api("/api/accounts");
   const { ok, data } = await safeJson(r);
   if (!ok) throw new Error("账号列表加载失败，请重试");
+  // **不过滤已绑定账号**：账号被别的 Key 绑着也要列出来，独占模式下选中即抢占。
+  // 占用情况写进 label，由「独占 / 共享」模式决定选中后的实际行为。
   const options = [{ value: "0", label: "不绑定（使用公共账号池）" }].concat(
-    (data.items || []).filter(a => !a.bound_key_id || a.bound_key_id === key?.id)
-      .map(a => ({ value: String(a.id), label: `${a.name || a.uid || "账号"} #${a.id} · ${a.balance_remain} 积分${a.status !== "active" ? " · 已禁用" : ""}` })));
+    (data.items || []).map(a => {
+      const n = Number(a.bound_key_count || 0);
+      const mine = !!(key?.id && a.bound_key_id === key.id);
+      const taken = n > 0 && !mine;
+      const who = taken
+        ? ` · 已被 ${a.bound_key_name || ("#" + a.bound_key_id)}${n > 1 ? ` 等 ${n} 把` : ""} 占用`
+        : (mine && n > 1 ? ` · 共 ${n} 把 Key 绑定` : "");
+      return {
+        value: String(a.id),
+        label: `${a.name || a.uid || "账号"} #${a.id} · ${a.balance_remain} 积分${a.status !== "active" ? " · 已禁用" : ""}${who}`,
+        taken,
+      };
+    }));
   if (key?.account_id && !options.some(o => o.value === String(key.account_id)))
     options.push({ value: String(key.account_id), label: `原绑定账号 #${key.account_id}（不存在）` });
   return options;
 }
-function keyAccountSelect(id, options, value = 0, selectedIds = null) {
-  // 单 Key 绑定多账号：渲染成勾选列表。selectedIds 传数组时用多选形态；
-  // 不传（旧调用）时退化为原来的单选下拉。
+function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode = "exclusive") {
+  // 多账号勾选列表 + 绑定模式按钮。
+  // bindMode：exclusive = 独占（账号归这把 Key 专用，别人选它即抢占）
+  //           shared    = 共享（多把 Key 可同时绑定同一账号，各自消耗）
   if (Array.isArray(selectedIds)) {
-    const boxes = options.filter(o => o.value !== "0").map(o =>
-      `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} /> <span>${esc(o.label)}</span></label>`
-    ).join("") || `<p class="text-xs text-slate-400">暂无可绑定账号</p>`;
-    return `<div class="mb-3"><label class="text-xs text-slate-500">绑定账号（可多选，不独占）</label>
-      <div id="${id}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
+    const shared = bindMode === "shared";
+    const boxes = options.filter(o => o.value !== "0").map(o => {
+      const blocked = !shared && o.taken;
+      return `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} data-taken="${o.taken ? 1 : 0}" /> <span class="${blocked ? "text-amber-600" : ""}">${esc(o.label)}${blocked ? "（选中将抢占）" : ""}</span></label>`;
+    }).join("") || `<p class="text-xs text-slate-400">暂无账号</p>`;
+    return `<div class="mb-3">
+      <label class="text-xs text-slate-500">绑定方式</label>
+      <div class="flex gap-2 mt-1 mb-2">
+        <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">独占账户</button>
+        <button type="button" id="${id}ModeShared" data-mode="shared" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','shared')">共享账户</button>
+      </div>
+      <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${shared
+        ? "共享：多把 Key 可以同时绑定同一账号，各自独立消耗它的积分，互不封锁。"
+        : "独占：账号归这把 Key 专用 —— 已被其他 Key 占用的账号也能勾选，保存后会把对方解绑（抢占）。"}</div>
+      <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
       <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
-      <p class="text-[11px] text-slate-400 mt-1">勾选后此 Key 只在这些账号间选择并使用它们的积分/模型权益；<b>账号不独占</b> —— 仍留在公共池，其它 Key 也可绑定同一账号，各自独立消耗。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
+      <p class="text-[11px] text-slate-400 mt-1">勾选后此 Key 只在这些账号间选择并使用它们的积分/模型权益。被绑定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
   }
   return `<div class="mb-3"><label class="text-xs text-slate-500">绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
-    <p class="text-[11px] text-slate-400 mt-1">绑定后此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号；账号不被独占，其它 Key 可绑定同一账号。</p></div>`;
+    <p class="text-[11px] text-slate-400 mt-1">绑定后此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。</p></div>`;
+}
+// 切换绑定方式：只改样式与提示，保留已勾选项（切模式不丢选择）
+function setKeyBindMode(id, mode) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  wrap.dataset.bindMode = mode;
+  const ex = document.getElementById(id + "ModeExclusive");
+  const sh = document.getElementById(id + "ModeShared");
+  [ex, sh].forEach(b => { if (b) b.classList.remove("btn-primary", "text-white"); });
+  const active = mode === "shared" ? sh : ex;
+  if (active) active.classList.add("btn-primary", "text-white");
+  const hint = document.getElementById(id + "ModeHint");
+  if (hint) hint.innerHTML = mode === "shared"
+    ? "共享：多把 Key 可以同时绑定同一账号，各自独立消耗它的积分，互不封锁。"
+    : "独占：账号归这把 Key 专用 —— 已被其他 Key 占用的账号也能勾选，保存后会把对方解绑（抢占）。";
+  // 独占模式下给「被别人占用」的账号加醒目提示
+  wrap.querySelectorAll(".wba-key-acc").forEach(el => {
+    const span = el.nextElementSibling;
+    if (!span) return;
+    const label = span.textContent.replace(/（选中将抢占）$/, "");
+    span.textContent = (mode !== "shared" && el.dataset.taken === "1") ? label + "（选中将抢占）" : label;
+    span.className = (mode !== "shared" && el.dataset.taken === "1") ? "text-amber-600" : "";
+  });
+}
+function keyBindMode(id) {
+  return document.getElementById(id)?.dataset.bindMode === "shared" ? "shared" : "exclusive";
 }
 function keyAccountIds(id) {
   if (document.getElementById(id + "None")?.checked) return [];
@@ -4582,7 +4632,7 @@ async function openAddKey(){
       })}</div>
       <p class="text-[11px] text-slate-400 mt-1">选择后该 Key 只能调用组内模型，调用组外模型返回 403。</p>
     </div>
-    ${keyAccountSelect("kAccount", accountOptions, 0, [])}
+    ${keyAccountSelect("kAccount", accountOptions, 0, [], "exclusive")}
     <input id="kNote" class="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="备注（可选）" />
     <div class="flex justify-end gap-2 mt-2">
       <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
@@ -4593,7 +4643,7 @@ async function submitAddKey(){
   const unlimited = $("#kUnlimited").checked || $("#kLimit").value.trim() === "";
   const mcRaw = $("#kMaxConcurrent").value;
   const rpmRaw = $("#kRatePerMinute").value;
-  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_ids: keyAccountIds("kAccount"),
+  const body = { name:$("#kName").value||"", unlimited, credit_limit: Number($("#kLimit").value||0), note:$("#kNote").value||"", group_id: Number(uiSelectValue("kGroup")||0), account_ids: keyAccountIds("kAccount"), bind_mode: keyBindMode("kAccount"),
     max_concurrent: mcRaw === "" ? null : Number(mcRaw), rate_per_minute: rpmRaw === "" ? null : Number(rpmRaw) };
   const r = await api("/api/keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const d = await r.json().catch(()=>({}));
@@ -4664,7 +4714,7 @@ async function editKey(id){
     })}</div>
     <p class="text-[11px] text-slate-400 -mt-2 mb-3">不限制 = 可用全部启用模型；选了分组则只能调用组内模型。</p>
 
-    ${keyAccountSelect("ekAccount", accountOptions, k.account_id || 0, k.account_ids || (k.account_id ? [k.account_id] : []))}
+    ${keyAccountSelect("ekAccount", accountOptions, k.account_id || 0, k.account_ids || (k.account_id ? [k.account_id] : []), k.bind_mode || "exclusive")}
     <label class="block text-xs text-slate-500 mb-1">积分限额（credits）</label>
     <input id="ekLimit" type="number" min="0" class="w-full border rounded-lg px-3 py-2 mb-3 text-sm" value="${k.unlimited ? "" : k.credit_limit}" placeholder="留空不限额；填写 0 表示零额度" oninput="document.getElementById('ekUnlimited').checked=this.value.trim()===''" />
     <label class="flex items-center gap-2 text-sm mb-1"><input id="ekUnlimited" type="checkbox" onchange="if(this.checked) document.getElementById('ekLimit').value=''" ${k.unlimited ? "checked" : ""} /> 不限额（∞）</label>
@@ -4689,7 +4739,7 @@ async function submitEditKey(id){
   const body = {
     name,
     group_id: Number(uiSelectValue("ekGroup") || 0),
-    account_ids: keyAccountIds("ekAccount"),
+    account_ids: keyAccountIds("ekAccount"), bind_mode: keyBindMode("ekAccount"),
     credit_limit: Number($("#ekLimit").value || 0),
     unlimited: $("#ekUnlimited").checked || $("#ekLimit").value.trim() === "",
     max_concurrent: mcRaw === "" ? null : Number(mcRaw),

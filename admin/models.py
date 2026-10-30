@@ -131,6 +131,10 @@ class ApiKey(Base):
     group_id = Column(Integer, default=0)
     # NULL = public pool; a reservation survives revocation until explicitly released.
     account_id = Column(Integer, nullable=True, default=None)
+    # 绑定方式：exclusive = 独占（账号归这把 Key 专用；别人选中该账号即「抢占」，
+    # 旧 Key 的绑定会被解除）；shared = 共享（多把 Key 可同时绑定同一账号，
+    # 各自独立消耗，互不封锁）。NULL/空串按 exclusive 处理（兼容老数据）。
+    bind_mode = Column(String(16), default="exclusive")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -141,8 +145,8 @@ class ApiKeyAccount(Base):
     ApiKey.account_id 保留为「主绑定」（兼容老数据与既有查询），
     本表存同一 Key 的其余绑定账号。
 
-    绑定**不互斥**：同一账号可以被多把 Key 同时绑定（各自独立消耗），
-    账号也始终留在公共池供未绑定的 Key 使用。
+    账号可以被多把 Key 同时绑定，但**独占模式下后来者会抢占**（其他 Key 的
+    该账号绑定被解除）；共享模式下可长期共存、各自独立消耗。
     约束只保证「同一 Key 内不重复绑定同一账号」：(key_id, account_id) 唯一。
     """
 

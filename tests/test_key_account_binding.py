@@ -94,13 +94,23 @@ class OwnershipTests(Fixture, unittest.TestCase):
         self.assertNotIn(self.a.id, pool)
         self.assertNotIn(dup.id, pool)
         self.assertEqual(binding_owners(self.db)[dup.id].id, self.private.id)
-        # 名额放开：第二把 Key 绑定同一账号不再 409
-        created = keys.create_key(keys.KeyIn(account_id=self.a.id), db=self.db)
-        self.assertIsNotNone(created["id"])
-        self.assertEqual(created["account_ids"], [self.a.id])
-        # 两把 Key 都能在该账号上选号
+
+        # 共享模式：第二把 Key 也能绑同一账号，两把 Key 都能在该账号选号
+        shared = keys.create_key(
+            keys.KeyIn(account_id=self.a.id, bind_mode="shared"), db=self.db)
+        self.assertEqual(shared["account_ids"], [self.a.id])
+        self.assertEqual(shared["bind_mode"], "shared")
         self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=self.private.id).id, self.a.id)
-        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=created["id"]).id, self.a.id)
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=shared["id"]).id, self.a.id)
+
+        # 独占模式：后绑的 Key **抢占** —— 前面那把 Key 的该账号绑定被解除
+        exclusive = keys.create_key(
+            keys.KeyIn(account_id=self.a.id, bind_mode="exclusive"), db=self.db)
+        self.assertEqual(exclusive["account_ids"], [self.a.id])
+        self.assertIn({"key_id": shared["id"], "account_id": self.a.id}, exclusive["released"])
+        self.db.expire_all()
+        self.assertIsNone(proxy._select_account(self.db, account_id=self.a.id, key_id=shared["id"]))
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=exclusive["id"]).id, self.a.id)
 
     def test_revocation_keeps_binding_and_unbind_restores_pool(self):
         # 停用 Key 后：显式指定该账号 + 该 Key 仍不放行（Key 不活跃）

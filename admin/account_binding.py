@@ -105,14 +105,41 @@ def validate_binding(db, account_id, key_id=None):
     return ids[0] if ids else None
 
 
+def _release_account(db, account_ids, keep_key_id=None):
+    """把 account_ids 从**其它** Key 的绑定里摘掉（独占抢占用）。
+
+    返回被抢占的 (Key 主键, 账号 id) 列表，供响应回显「抢占了谁」。
+    账号从对方的主绑定 `account_id` 与关联表两处一起移除，避免残留半绑定。
+    """
+    released = []
+    if not account_ids:
+        return released
+    ids = [int(a) for a in account_ids]
+    victims = db.query(ApiKey).filter(
+        ApiKey.account_id.in_(ids),
+        ApiKey.id != keep_key_id if keep_key_id else True,
+    ).with_for_update().all()
+    for v in victims:
+        released.append((v.id, int(v.account_id)))
+        v.account_id = None
+    extra = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(ids))
+    if keep_key_id:
+        extra = extra.filter(ApiKeyAccount.key_id != keep_key_id)
+    for row in extra.with_for_update().all():
+        released.append((row.key_id, int(row.account_id)))
+        db.delete(row)
+    return released
+
+
 def validate_binding_multi(db, account_ids, key_id=None):
     """校验并归一一个 Key 要绑定的账号 id 列表。
 
     规则：
       * 空列表 / [0] / [None] → 不绑定（清空全部绑定）；
       * 每个账号必须存在；
-      * **不与其它 Key 冲突**：同一账号可以被任意多把 Key 同时绑定，
-        绑定只限定「这把 Key 能用哪些号」，不构成占用。
+      * 不与其它 Key 冲突：同一账号可被多把 Key 绑定。**独占抢占**不在这里
+        做（那会改动其它 Key 的绑定关系）—— 由调用方在写库时按 bind_mode
+        走 `_release_account`。
     返回去重后的 id 列表。
     """
     if account_ids is None:
@@ -141,18 +168,27 @@ def validate_binding_multi(db, account_ids, key_id=None):
     return cleaned
 
 
-def sync_key_bindings(db, key_id, account_ids):
+def sync_key_bindings(db, key_id, account_ids, bind_mode="exclusive"):
     """把 Key 的绑定集合同步为 account_ids。
 
     第一个账号写主绑定 `account_id`（兼容老数据与既有查询），其余进关联表。
-    同一账号可被多把 Key 绑定，这里不查冲突。
+
+    bind_mode="exclusive"：**抢占** —— 这些账号若还绑在别的 Key 上，先把对方
+    的绑定解除（对方变回公共池 / 减少绑定账号），保证账号只归这把 Key 专用。
+    bind_mode="shared"：不动其它 Key 的绑定，多把 Key 共存共享。
+
+    返回 (ids, released)：released 是被抢占掉的 (Key 主键, 账号 id) 列表。
     """
     ids = validate_binding_multi(db, account_ids, key_id)
-    primary = ids[0] if ids else None
-    rest = ids[1:]
     key = db.query(ApiKey).filter(ApiKey.id == key_id).with_for_update().first()
     if key is None:
         raise HTTPException(404, "API Key 不存在")
+    released = []
+    mode = "shared" if bind_mode == "shared" else "exclusive"
+    if mode == "exclusive" and ids:
+        released = _release_account(db, ids, keep_key_id=key_id)
+    primary = ids[0] if ids else None
+    rest = ids[1:]
     key.account_id = primary
     existing = {int(r.account_id): r for r in db.query(ApiKeyAccount).filter(
         ApiKeyAccount.key_id == key_id).all()}
@@ -162,8 +198,10 @@ def sync_key_bindings(db, key_id, account_ids):
     for aid in rest:
         if aid not in existing:
             db.add(ApiKeyAccount(key_id=key_id, account_id=aid))
-    db.commit()
-    return ids
+    # 只 flush 不 commit：让调用方把「模式 / 名称 / 限额」等改动与绑定一起提交，
+    # 避免中途 commit 让会话对象过期、后续字段写不进去。
+    db.flush()
+    return ids, released
 
 
 def binding_owners(db):
