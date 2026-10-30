@@ -85,32 +85,32 @@ class OwnershipTests(Fixture, unittest.TestCase):
         with patch.object(proxy.POOL.sticky, "resolve", side_effect=lambda key, uids: "private" if "private" in uids else None):
             self.assertEqual(proxy._select_account(self.db, sticky_key="session").id, self.b.id)
 
-    def test_duplicate_uid_and_shared_binding(self):
-        # 归属不变：被 Key 绑定的账号（含同 uid 镜像行）不进公共池
+    def test_exclusive_multi_key_and_whitelist(self):
+        """独占可叠加、白名单不影响公共池。"""
         dup = Account(uid=self.a.uid, auth_json="{}", balance_remain=999)
         self.db.add(dup)
         self.db.commit()
-        pool = [a.id for a in scope_accounts(self.db.query(Account)).all()]
+
+        # ① 独占：self.private 已选中 a；第二把独占 Key 也能选中 a（叠加不抢占）
+        k2 = keys.create_key(keys.KeyIn(account_id=self.a.id), db=self.db)
+        self.assertEqual(k2["account_ids"], [self.a.id])
+        self.assertEqual(k2["bind_mode"], "exclusive")
+        # 两把独占 Key 都能用 a
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=self.private.id).id, self.a.id)
+        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=k2["id"]).id, self.a.id)
+        # 而公共池里看不到 a（独占 = 退出公共池），同 uid 镜像行也看不到
+        pool = [x.id for x in scope_accounts(self.db.query(Account)).all()]
         self.assertNotIn(self.a.id, pool)
         self.assertNotIn(dup.id, pool)
-        self.assertEqual(binding_owners(self.db)[dup.id].id, self.private.id)
 
-        # 共享模式：第二把 Key 也能绑同一账号，两把 Key 都能在该账号选号
-        shared = keys.create_key(
-            keys.KeyIn(account_id=self.a.id, bind_mode="shared"), db=self.db)
-        self.assertEqual(shared["account_ids"], [self.a.id])
-        self.assertEqual(shared["bind_mode"], "shared")
-        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=self.private.id).id, self.a.id)
-        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=shared["id"]).id, self.a.id)
-
-        # 独占模式：后绑的 Key **抢占** —— 前面那把 Key 的该账号绑定被解除
-        exclusive = keys.create_key(
-            keys.KeyIn(account_id=self.a.id, bind_mode="exclusive"), db=self.db)
-        self.assertEqual(exclusive["account_ids"], [self.a.id])
-        self.assertIn({"key_id": shared["id"], "account_id": self.a.id}, exclusive["released"])
-        self.db.expire_all()
-        self.assertIsNone(proxy._select_account(self.db, account_id=self.a.id, key_id=shared["id"]))
-        self.assertEqual(proxy._select_account(self.db, account_id=self.a.id, key_id=exclusive["id"]).id, self.a.id)
+        # ② 白名单：Key 只能用选中的号，但账号**仍留在公共池**
+        wl = keys.create_key(keys.KeyIn(account_id=self.b.id, bind_mode="whitelist"), db=self.db)
+        self.assertEqual(wl["bind_mode"], "whitelist")
+        self.assertEqual(proxy._select_account(self.db, account_id=self.b.id, key_id=wl["id"]).id, self.b.id)
+        # b 没有被任何独占 Key 选中 → 公共池仍可见
+        self.assertIn(self.b.id, [x.id for x in scope_accounts(self.db.query(Account)).all()])
+        # 白名单 Key 不能用未选中的号
+        self.assertIsNone(proxy._select_account(self.db, account_id=self.a.id, key_id=wl["id"]))
 
     def test_revocation_keeps_binding_and_unbind_restores_pool(self):
         # 停用 Key 后：显式指定该账号 + 该 Key 仍不放行（Key 不活跃）

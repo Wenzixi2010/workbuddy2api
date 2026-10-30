@@ -183,7 +183,7 @@ def init_db() -> bool:
         # 迁移：api_keys 加 max_concurrent（NULL=全局；0=不限；N=N 路并发）
         _ensure_column("api_keys", "max_concurrent", "INT", "NULL")
         _ensure_column("api_keys", "rate_per_minute", "INT", "NULL")
-        # 迁移：绑定方式（exclusive=独占可抢占 / shared=共享；缺省独占兼容老数据）
+        # 迁移：绑定方式（exclusive=独占账号退出公共池 / whitelist=白名单不影响账号）
         _ensure_column("api_keys", "bind_mode", "VARCHAR(16)", "DEFAULT 'exclusive'")
         # 迁移：把「一个账号只能属于一个 Key」的库级唯一索引降级为普通索引。
         #

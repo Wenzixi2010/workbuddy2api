@@ -1,19 +1,30 @@
 """Account ownership shared by key management and every gateway selection path.
 
-绑定语义：一个 API Key 可以绑定一个（ApiKey.account_id 主绑定，兼容老数据）或
-多个账号（ApiKeyAccount 关联表），**一个账号也可以被多把 Key 同时绑定**。
+绑定语义（两种方式，二选一）：
 
-两件事分开看：
-  * 账号归属：被任何活跃 Key 绑定的账号**不进公共池** —— 只归绑定它的那些
-    Key 使用（与历史语义一致，没有放开）。
-  * 绑定名额：一个账号能被几把 Key 绑定 —— 从「至多一把」放开为「不限把数」。
-    多把 Key 指向同一账号时各自独立消耗积分，互不封锁。
+  * **独占（exclusive）** —— 账号被这把 Key 选中后，**只**归选中它的那些 Key
+    使用，永不进公共池。一个账号可以被多把独占 Key 同时选中（叠加占用，
+    互不抢占）；要解除只能各自解绑。
+  * **白名单（whitelist）** —— 只限制「这把 Key 能用哪些号」，账号本身
+    **不受任何影响**，照常留在公共池供其它 Key 使用。
+
+历史说明：早期只有互斥独占（一个账号至多一把 Key）；后来尝试过
+「多 Key 共享同一账号且账号留池」，但那让独占失去意义，故拆成上面两种。
 """
 from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import aliased
 
 from admin.models import Account, ApiKey, ApiKeyAccount
+
+
+def _is_exclusive(key_col):
+    """SQL 侧「该 Key 是独占模式」的条件。
+
+    bind_mode 为 NULL / 空串的历史数据一律按 exclusive 处理 —— 老 Key 的
+    独占语义在升级后保持不变。
+    """
+    return or_(key_col.bind_mode.is_(None), key_col.bind_mode != "whitelist")
 
 
 def scope_accounts(query, account_id=None, key_id=None):
@@ -56,12 +67,14 @@ def scope_accounts(query, account_id=None, key_id=None):
             if uids:
                 cond = or_(cond, Account.uid.in_(uids))
             return query.filter(cond)
-    # 公共池：排除**所有被任何活跃 Key 绑定**的账号。
+    # 公共池：排除**被任何活跃「独占」Key 选中的账号**。
     #
-    # 绑定的开销语义没变：账号一旦被某把 Key 绑定，就只归绑定它的那几把 Key
-    # 使用，不再进公共池。放开的只是「一个账号能被几把 Key 绑定」——
-    # 从「至多一把」变成「不限把数」，所以这里的排除条件不再关心「谁」，
-    # 只关心「有没有」。
+    # 两种绑定方式的区别正在这里：
+    #   * exclusive（独占）：账号被选走后**只归绑定它的这些 Key 使用**，
+    #     永不进公共池。一个账号可以被多把独占 Key 同时选中（叠加，不抢占），
+    #     但公共池始终看不到它。
+    #   * whitelist（白名单）：只限制「这把 Key 能用哪些号」，账号**不受影响**，
+    #     照常留在公共池供其它 Key 使用。
     #
     # ⚠️ `reserved` / `reserved_multi` 必须**显式 join** 到对应的
     # `ApiKey.account_id` / `ApiKeyAccount.account_id` 上。
@@ -72,6 +85,7 @@ def scope_accounts(query, account_id=None, key_id=None):
     legacy_owned = select(ApiKey.id).select_from(ApiKey).outerjoin(
         reserved, reserved.id == ApiKey.account_id).where(
             ApiKey.status == "active",
+            _is_exclusive(ApiKey),
             ApiKey.account_id.is_not(None),
             or_(ApiKey.account_id == Account.id,
                 (reserved.uid != "") & (reserved.uid == Account.uid))).exists()
@@ -80,6 +94,7 @@ def scope_accounts(query, account_id=None, key_id=None):
         ApiKey, ApiKey.id == ApiKeyAccount.key_id).outerjoin(
         reserved_multi, reserved_multi.id == ApiKeyAccount.account_id).where(
         ApiKey.status == "active",
+        _is_exclusive(ApiKey),
         or_(ApiKeyAccount.account_id == Account.id,
             (reserved_multi.uid != "") & (reserved_multi.uid == Account.uid))).exists()
     return query.filter(~legacy_owned, ~multi_owned)
@@ -105,41 +120,14 @@ def validate_binding(db, account_id, key_id=None):
     return ids[0] if ids else None
 
 
-def _release_account(db, account_ids, keep_key_id=None):
-    """把 account_ids 从**其它** Key 的绑定里摘掉（独占抢占用）。
-
-    返回被抢占的 (Key 主键, 账号 id) 列表，供响应回显「抢占了谁」。
-    账号从对方的主绑定 `account_id` 与关联表两处一起移除，避免残留半绑定。
-    """
-    released = []
-    if not account_ids:
-        return released
-    ids = [int(a) for a in account_ids]
-    victims = db.query(ApiKey).filter(
-        ApiKey.account_id.in_(ids),
-        ApiKey.id != keep_key_id if keep_key_id else True,
-    ).with_for_update().all()
-    for v in victims:
-        released.append((v.id, int(v.account_id)))
-        v.account_id = None
-    extra = db.query(ApiKeyAccount).filter(ApiKeyAccount.account_id.in_(ids))
-    if keep_key_id:
-        extra = extra.filter(ApiKeyAccount.key_id != keep_key_id)
-    for row in extra.with_for_update().all():
-        released.append((row.key_id, int(row.account_id)))
-        db.delete(row)
-    return released
-
-
 def validate_binding_multi(db, account_ids, key_id=None):
     """校验并归一一个 Key 要绑定的账号 id 列表。
 
     规则：
       * 空列表 / [0] / [None] → 不绑定（清空全部绑定）；
       * 每个账号必须存在；
-      * 不与其它 Key 冲突：同一账号可被多把 Key 绑定。**独占抢占**不在这里
-        做（那会改动其它 Key 的绑定关系）—— 由调用方在写库时按 bind_mode
-        走 `_release_account`。
+      * **不与其它 Key 冲突**：同一账号可被多把 Key 同时选中（独占是叠加，
+        白名单只是各管各的），所以这里只校验存在性。
     返回去重后的 id 列表。
     """
     if account_ids is None:
@@ -168,25 +156,18 @@ def validate_binding_multi(db, account_ids, key_id=None):
     return cleaned
 
 
-def sync_key_bindings(db, key_id, account_ids, bind_mode="exclusive"):
+def sync_key_bindings(db, key_id, account_ids):
     """把 Key 的绑定集合同步为 account_ids。
 
     第一个账号写主绑定 `account_id`（兼容老数据与既有查询），其余进关联表。
-
-    bind_mode="exclusive"：**抢占** —— 这些账号若还绑在别的 Key 上，先把对方
-    的绑定解除（对方变回公共池 / 减少绑定账号），保证账号只归这把 Key 专用。
-    bind_mode="shared"：不动其它 Key 的绑定，多把 Key 共存共享。
-
-    返回 (ids, released)：released 是被抢占掉的 (Key 主键, 账号 id) 列表。
+    两种绑定方式（独占 / 白名单）在这里做法一致 —— 差别只在「账号是否因此
+    退出公共池」，那由 `scope_accounts` 按 Key 的 bind_mode 判定。
+    多把 Key 可以选中同一账号，互不抢占。
     """
     ids = validate_binding_multi(db, account_ids, key_id)
     key = db.query(ApiKey).filter(ApiKey.id == key_id).with_for_update().first()
     if key is None:
         raise HTTPException(404, "API Key 不存在")
-    released = []
-    mode = "shared" if bind_mode == "shared" else "exclusive"
-    if mode == "exclusive" and ids:
-        released = _release_account(db, ids, keep_key_id=key_id)
     primary = ids[0] if ids else None
     rest = ids[1:]
     key.account_id = primary
@@ -201,7 +182,7 @@ def sync_key_bindings(db, key_id, account_ids, bind_mode="exclusive"):
     # 只 flush 不 commit：让调用方把「模式 / 名称 / 限额」等改动与绑定一起提交，
     # 避免中途 commit 让会话对象过期、后续字段写不进去。
     db.flush()
-    return ids, released
+    return ids
 
 
 def binding_owners(db):

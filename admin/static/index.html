@@ -4525,7 +4525,7 @@ async function keyAccountOptions(key) {
   const r = await api("/api/accounts");
   const { ok, data } = await safeJson(r);
   if (!ok) throw new Error("账号列表加载失败，请重试");
-  // **不过滤已绑定账号**：账号被别的 Key 绑着也要列出来，独占模式下选中即抢占。
+  // **不过滤已绑定账号**：账号被别的 Key 选着也要列出来（独占可叠加选中）。
   // 占用情况写进 label，由「独占 / 共享」模式决定选中后的实际行为。
   const options = [{ value: "0", label: "不绑定（使用公共账号池）" }].concat(
     (data.items || []).map(a => {
@@ -4547,23 +4547,22 @@ async function keyAccountOptions(key) {
 }
 function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode = "exclusive") {
   // 多账号勾选列表 + 绑定模式按钮。
-  // bindMode：exclusive = 独占（账号归这把 Key 专用，别人选它即抢占）
-  //           shared    = 共享（多把 Key 可同时绑定同一账号，各自消耗）
+  // bindMode：exclusive = 独占（账号只归选中它的 Key 用，退出公共池）
+  //           whitelist = 白名单（只限制本 Key 用哪些号，账号照常留池）
   if (Array.isArray(selectedIds)) {
-    const shared = bindMode === "shared";
+    const shared = bindMode === "whitelist";
     const boxes = options.filter(o => o.value !== "0").map(o => {
-      const blocked = !shared && o.taken;
-      return `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} data-taken="${o.taken ? 1 : 0}" /> <span class="${blocked ? "text-amber-600" : ""}">${esc(o.label)}${blocked ? "（选中将抢占）" : ""}</span></label>`;
+      return `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} data-taken="${o.taken ? 1 : 0}" /> <span>${esc(o.label)}</span></label>`;
     }).join("") || `<p class="text-xs text-slate-400">暂无账号</p>`;
     return `<div class="mb-3">
       <label class="text-xs text-slate-500">绑定方式</label>
       <div class="flex gap-2 mt-1 mb-2">
         <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">独占账户</button>
-        <button type="button" id="${id}ModeShared" data-mode="shared" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','shared')">共享账户</button>
+        <button type="button" id="${id}ModeShared" data-mode="whitelist" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','whitelist')">白名单</button>
       </div>
       <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${shared
-        ? "共享：多把 Key 可以同时绑定同一账号，各自独立消耗它的积分，互不封锁。"
-        : "独占：账号归这把 Key 专用 —— 已被其他 Key 占用的账号也能勾选，保存后会把对方解绑（抢占）。"}</div>
+        ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
+        : "独占：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
       <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
       <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
       <p class="text-[11px] text-slate-400 mt-1">勾选后此 Key 只在这些账号间选择并使用它们的积分/模型权益。被绑定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
@@ -4580,23 +4579,15 @@ function setKeyBindMode(id, mode) {
   const ex = document.getElementById(id + "ModeExclusive");
   const sh = document.getElementById(id + "ModeShared");
   [ex, sh].forEach(b => { if (b) b.classList.remove("btn-primary", "text-white"); });
-  const active = mode === "shared" ? sh : ex;
+  const active = mode === "whitelist" ? sh : ex;
   if (active) active.classList.add("btn-primary", "text-white");
   const hint = document.getElementById(id + "ModeHint");
-  if (hint) hint.innerHTML = mode === "shared"
-    ? "共享：多把 Key 可以同时绑定同一账号，各自独立消耗它的积分，互不封锁。"
-    : "独占：账号归这把 Key 专用 —— 已被其他 Key 占用的账号也能勾选，保存后会把对方解绑（抢占）。";
-  // 独占模式下给「被别人占用」的账号加醒目提示
-  wrap.querySelectorAll(".wba-key-acc").forEach(el => {
-    const span = el.nextElementSibling;
-    if (!span) return;
-    const label = span.textContent.replace(/（选中将抢占）$/, "");
-    span.textContent = (mode !== "shared" && el.dataset.taken === "1") ? label + "（选中将抢占）" : label;
-    span.className = (mode !== "shared" && el.dataset.taken === "1") ? "text-amber-600" : "";
-  });
+  if (hint) hint.innerHTML = mode === "whitelist"
+    ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
+    : "独占：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。";
 }
 function keyBindMode(id) {
-  return document.getElementById(id)?.dataset.bindMode === "shared" ? "shared" : "exclusive";
+  return document.getElementById(id)?.dataset.bindMode === "whitelist" ? "whitelist" : "exclusive";
 }
 function keyAccountIds(id) {
   if (document.getElementById(id + "None")?.checked) return [];
