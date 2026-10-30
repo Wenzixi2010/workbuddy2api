@@ -61,20 +61,41 @@ def _pool_remaining_credits(db: Session) -> float:
     return float(sum((r[0] or 0) for r in rows))
 
 
+def _key_scope_credits(db: Session, key: ApiKey) -> float:
+    """这把 Key 能看到的**上游真实积分**。
+
+    口径：Key 独占绑定了账号 → 只算被绑定的那些账号（这把 Key 的消耗
+    只落在这些号上，看全池总额反而误导）；未绑定任何账号（共享 Key）
+    → 全池启用账号之和。注意这与 credit_limit（本地计费限额）是两个
+    维度 —— 有限额的 Key 在 subscription 端点仍显示其限额。
+    """
+    from admin.account_binding import _bound_account_ids
+    bound = _bound_account_ids(db, key.id)
+    if bound:
+        rows = db.query(Account.balance_remain).filter(
+            Account.id.in_(bound)).all()
+        return float(sum((r[0] or 0) for r in rows))
+    return _pool_remaining_credits(db)
+
+
 @router.get("/v1/dashboard/billing/subscription")
 def billing_subscription(
     db: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ):
-    """总额度：OneAPI 口径的 hard_limit_usd（单位 = 元/积分）。"""
+    """总额度：OneAPI 口径的 hard_limit_usd（单位 = 元/积分）。
+
+    unlimited Key → 这把 Key **对应账号**的上游积分（独占绑定算绑定号，
+    共享 Key 算全池）；有限额 Key → 其本地限额 credit_limit。
+    """
     api_key = _key_from_header(authorization, x_api_key)
     key = get_key_row(db, api_key)
     if key is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="无效 API Key")
     if key.unlimited:
-        total = _pool_remaining_credits(db)
+        total = _key_scope_credits(db, key)
     else:
         total = float(key.credit_limit or 0)
     return {
