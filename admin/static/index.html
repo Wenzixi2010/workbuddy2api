@@ -2412,7 +2412,9 @@ function accRow(a) {
           ${a.domain && (a.domain.includes("codebuddy.ai") || a.domain.includes("workbuddy.ai")) ? `<span class="fs-10-5" style="color:#6C4DFF" title="国际版账号（${esc(a.domain)}）">国际版</span>` : ''}
           <span class="c-uid" title="${esc(a.uid || "")}">${esc(a.uid || "-")}</span>
         </div>
-        ${a.bound_key_id ? `<div class="nm-sub"><span class="text-indigo-600 fs-10-5" title="该账号被以下 API Key 绑定使用（可多把）">Key 绑定：${esc(a.bound_key_name || ("#" + a.bound_key_id))}${a.bound_key_count > 1 ? ` 等 ${a.bound_key_count} 把` : ""}</span></div>` : ''}
+        ${a.bound_key_id ? `<div class="nm-sub">${a.locked
+          ? `<span class="text-indigo-600 fs-10-5" title="该账号被专属锁定，只归选中的 Key 使用，不进公共池">🔒 专属锁定：${esc(a.bound_key_name || ("#" + a.bound_key_id))}${a.bound_key_count > 1 ? ` 等 ${a.bound_key_count} 把` : ""}</span>`
+          : `<span class="text-slate-500 fs-10-5" title="仅作为白名单限制这些 Key 的选号范围，账号仍在公共池">白名单：${esc(a.bound_key_name || ("#" + a.bound_key_id))}${a.bound_key_count > 1 ? ` 等 ${a.bound_key_count} 把` : ""}</span>`}</div>` : ''}
           ${a.post_login_automation ? `<small style="color:var(--fg-muted)" title="${esc((a.post_login_automation.result?.errors || []).join('；'))}">${esc(({queued:'自动任务排队中',running:'自动任务执行中',completed:'自动任务已完成',failed:'部分自动任务未完成'})[a.post_login_automation.status] || '')}</small>` : ''}
           ${a.resource_initialization && a.resource_initialization.status !== 'completed' ? `<small style="color:var(--fg-muted)" title="${esc((a.resource_initialization.errors || []).join('；'))}">${esc(({queued:'余额与模型初始化排队中',running:'正在初始化余额与模型',failed:'初始化未完成，可刷新余额或同步模型',invalid_credential:'账号凭证不完整，请重新导入或授权登录'})[a.resource_initialization.status] || '')}</small>` : ''}
         </div>
@@ -4409,10 +4411,14 @@ function keyRow(k) {
   return `
     <tr class="border-t hover:bg-slate-50">
       <td class="px-4 py-3">${esc(k.name||"未命名")}<div class="text-xs text-slate-400 mt-1">${(() => {
-        const md = "绑定账号";
-        if (k.account_ids && k.account_ids.length > 1) return `${md}（${k.account_ids.length} 个）：${esc((k.account_names || []).join("、"))}`;
-        if (k.account_id) return `${md}：${esc(k.account_name || ("#" + k.account_id))}`;
-        return "公共账号池";
+        const bound = (k.account_ids && k.account_ids.length)
+          ? k.account_ids.map(id => (k.account_names || [])[k.account_ids.indexOf(id)] || ("#" + id)).join("、")
+          : (k.account_id ? (k.account_name || ("#" + k.account_id)) : "");
+        if (!bound) return "公共账号池";
+        const mode = k.bind_mode === "whitelist"
+          ? `<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">白名单</span>`
+          : `<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px]">专属锁定</span>`;
+        return `${mode} ${esc(bound)}`;
       })()}</div></td>
       <td class="px-4 py-3 font-mono text-xs text-slate-500">${esc(k.masked)}</td>
       <td class="px-4 py-3">${k.unlimited?"∞":k.credit_limit}</td>
@@ -4525,16 +4531,17 @@ async function keyAccountOptions(key) {
   const r = await api("/api/accounts");
   const { ok, data } = await safeJson(r);
   if (!ok) throw new Error("账号列表加载失败，请重试");
-  // **不过滤已绑定账号**：账号被别的 Key 选着也要列出来（独占可叠加选中）。
-  // 占用情况写进 label，由「独占 / 共享」模式决定选中后的实际行为。
+  // **不过滤已绑定账号**：账号被别的 Key 选着也要列出来（专属锁定可叠加选中）。
+  // 占用情况写进 label，由「专属锁定 / 白名单」模式决定选中后的实际行为。
   const options = [{ value: "0", label: "不绑定（使用公共账号池）" }].concat(
     (data.items || []).map(a => {
       const n = Number(a.bound_key_count || 0);
       const mine = !!(key?.id && a.bound_key_id === key.id);
       const taken = n > 0 && !mine;
-      const who = taken
-        ? ` · 已被 ${a.bound_key_name || ("#" + a.bound_key_id)}${n > 1 ? ` 等 ${n} 把` : ""} 占用`
-        : (mine && n > 1 ? ` · 共 ${n} 把 Key 绑定` : "");
+      const who = a.locked && taken
+        ? ` · 🔒 已被 ${a.bound_key_name || ("#" + a.bound_key_id)}${n > 1 ? ` 等 ${n} 把` : ""} 专属锁定`
+        : (n > 0 && taken ? ` · 已被 ${a.bound_key_name || ("#" + a.bound_key_id)} 设为白名单`
+          : (mine && n > 1 ? ` · 共 ${n} 把 Key 选中` : ""));
       return {
         value: String(a.id),
         label: `${a.name || a.uid || "账号"} #${a.id} · ${a.balance_remain} 积分${a.status !== "active" ? " · 已禁用" : ""}${who}`,
@@ -4547,7 +4554,7 @@ async function keyAccountOptions(key) {
 }
 function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode = "exclusive") {
   // 多账号勾选列表 + 绑定模式按钮。
-  // bindMode：exclusive = 独占（账号只归选中它的 Key 用，退出公共池）
+  // bindMode：exclusive = 专属锁定（账号只归选中它的 Key 用，退出公共池）
   //           whitelist = 白名单（只限制本 Key 用哪些号，账号照常留池）
   if (Array.isArray(selectedIds)) {
     const shared = bindMode === "whitelist";
@@ -4557,12 +4564,12 @@ function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode =
     return `<div class="mb-3">
       <label class="text-xs text-slate-500">绑定方式</label>
       <div class="flex gap-2 mt-1 mb-2">
-        <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">独占账户</button>
+        <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">专属锁定</button>
         <button type="button" id="${id}ModeShared" data-mode="whitelist" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','whitelist')">白名单</button>
       </div>
       <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${shared
         ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
-        : "独占：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
+        : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
       <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
       <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
       <p class="text-[11px] text-slate-400 mt-1">勾选后此 Key 只在这些账号间选择并使用它们的积分/模型权益。被绑定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
@@ -4584,7 +4591,7 @@ function setKeyBindMode(id, mode) {
   const hint = document.getElementById(id + "ModeHint");
   if (hint) hint.innerHTML = mode === "whitelist"
     ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
-    : "独占：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。";
+    : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。";
 }
 function keyBindMode(id) {
   return document.getElementById(id)?.dataset.bindMode === "whitelist" ? "whitelist" : "exclusive";

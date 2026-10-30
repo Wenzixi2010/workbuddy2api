@@ -472,12 +472,22 @@ def _credit_fields(a: Account) -> dict:
 def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.query(Account).order_by(Account.id.desc()).all()
     owners = binding_owners(db)
-    # 一个账号可能被多把 Key 绑定（绑定已非互斥），统计绑定数量供界面标注
+    # 一个账号可能被多把 Key 选中；同时统计「是否被专属锁定」——
+    # 专属锁定的账号不再进公共池，界面上必须能看出来。
     bound_counts = {}
+    locked_ids = set()
     for k in db.query(ApiKey).filter(ApiKey.account_id.is_not(None)).all():
-        bound_counts[int(k.account_id)] = bound_counts.get(int(k.account_id), 0) + 1
+        aid = int(k.account_id)
+        bound_counts[aid] = bound_counts.get(aid, 0) + 1
+        # 空/缺省 bind_mode 按 exclusive（专属锁定）处理，与 scope_accounts 一致
+        if (k.bind_mode or "exclusive") != "whitelist" and k.status == "active":
+            locked_ids.add(aid)
     for m in db.query(ApiKeyAccount).all():
-        bound_counts[int(m.account_id)] = bound_counts.get(int(m.account_id), 0) + 1
+        aid = int(m.account_id)
+        bound_counts[aid] = bound_counts.get(aid, 0) + 1
+        owner = db.query(ApiKey).filter(ApiKey.id == m.key_id).first()
+        if owner is not None and (owner.bind_mode or "exclusive") != "whitelist"                 and owner.status == "active":
+            locked_ids.add(aid)
     now = datetime.utcnow()
     limits = _active_model_limits(db, now)
     from admin.post_login import states
@@ -495,6 +505,7 @@ def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db
             "bound_key_id": owners[a.id].id if owners.get(a.id) else None,
             "bound_key_name": owners[a.id].name if owners.get(a.id) else "",
             "bound_key_count": bound_counts.get(a.id, 0),
+            "locked": a.id in locked_ids,
             "balance_total": a.balance_total,
             "balance_remain": a.balance_remain,
             "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
