@@ -4553,51 +4553,105 @@ async function keyAccountOptions(key) {
   return options;
 }
 function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode = "exclusive") {
-  // 多账号勾选列表 + 绑定模式按钮。
+  // 多账号勾选列表 + 绑定方式滑块开关。
   // bindMode：exclusive = 专属锁定（账号只归选中它的 Key 用，退出公共池）
   //           whitelist = 白名单（只限制本 Key 用哪些号，账号照常留池）
+  // usePool：勾了「使用公共账号池」→ 不绑定任何账号（互斥关系，由开关联动）
   if (Array.isArray(selectedIds)) {
     const shared = bindMode === "whitelist";
+    const usePool = !selectedIds.length;
     const boxes = options.filter(o => o.value !== "0").map(o => {
-      return `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} data-taken="${o.taken ? 1 : 0}" /> <span>${esc(o.label)}</span></label>`;
+      return `<label class="flex items-center gap-2 text-sm py-0.5"><input type="checkbox" class="wba-key-acc" value="${o.value}" ${selectedIds.includes(Number(o.value)) ? "checked" : ""} data-taken="${o.taken ? 1 : 0}" onchange="keyAccToggled('${id}')" /> <span>${esc(o.label)}</span></label>`;
     }).join("") || `<p class="text-xs text-slate-400">暂无账号</p>`;
     return `<div class="mb-3">
       <label class="text-xs text-slate-500">绑定方式</label>
-      <div class="flex gap-2 mt-1 mb-2">
-        <button type="button" id="${id}ModeExclusive" data-mode="exclusive" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "" : "btn-primary text-white"}" onclick="setKeyBindMode('${id}','exclusive')">专属锁定</button>
-        <button type="button" id="${id}ModeShared" data-mode="whitelist" class="wba-mode-btn px-3 py-1 rounded-lg border text-xs ${shared ? "btn-primary text-white" : ""}" onclick="setKeyBindMode('${id}','whitelist')">白名单</button>
-      </div>
+      <div class="mt-1 mb-2">${switchHTML(id + "Mode", !shared, `setKeyBindMode('${id}', this.checked ? 'exclusive' : 'whitelist')`, "专属锁定", "白名单")}</div>
       <div class="text-[11px] text-slate-400 mb-1" id="${id}ModeHint">${shared
-        ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
+        ? "白名单：只限制本 Key 只能用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
         : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
-      <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5" style="border-color:var(--border)">${boxes}</div>
-      <label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" id="${id}None" ${selectedIds.length ? "" : "checked"} onchange="if(this.checked)this.closest('div').querySelectorAll('.wba-key-acc').forEach(el=>el.checked=false)" /> 不绑定（使用公共账号池）</label>
-      <p class="text-[11px] text-slate-400 mt-1">勾选后此 Key 只在这些账号间选择并使用它们的积分/模型权益。被绑定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
+      <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5 ${usePool ? "opacity-50 pointer-events-none" : ""}" style="border-color:var(--border)">${boxes}</div>
+      <div class="flex items-center gap-2 mt-2">${switchHTML(id + "Pool", usePool, `toggleKeyPool('${id}', this.checked)`, "不使用公共池", "使用公共账号池")}</div>
+      <p class="text-[11px] text-slate-400 mt-1">选中任意账号会自动关闭「使用公共账号池」；打开公共池会清空已选账号。专属锁定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
   }
   return `<div class="mb-3"><label class="text-xs text-slate-500">绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
     <p class="text-[11px] text-slate-400 mt-1">绑定后此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。</p></div>`;
 }
-// 切换绑定方式：只改样式与提示，保留已勾选项（切模式不丢选择）
-function setKeyBindMode(id, mode) {
+// 水平滑块开关（替代打勾）：左侧标签是「关闭态」，右侧是「打开态」
+function switchHTML(id, on, onchange, offLabel, onLabel) {
+  return `<label class="inline-flex items-center gap-2 cursor-pointer select-none">
+    <span class="text-xs ${on ? "text-slate-400" : "text-slate-700 font-medium"}">${esc(offLabel)}</span>
+    <span class="relative inline-flex items-center w-9 h-5 rounded-full transition-colors ${on ? "bg-indigo-600" : "bg-slate-300"}">
+      <input type="checkbox" id="${id}" class="sr-only" ${on ? "checked" : ""} onchange="${onchange}" />
+      <span class="absolute w-4 h-4 bg-white rounded-full shadow transition-transform" style="left:2px;transform:translateX(${on ? "18px" : "0px"})"></span>
+    </span>
+    <span class="text-xs ${on ? "text-slate-700 font-medium" : "text-slate-400"}">${esc(onLabel)}</span>
+  </label>`;
+}
+// 勾选/取消某个账号：只要有选中项就自动关掉「使用公共账号池」
+function keyAccToggled(id) {
   const wrap = document.getElementById(id);
   if (!wrap) return;
+  const any = !!wrap.querySelector(".wba-key-acc:checked");
+  const pool = document.getElementById(id + "Pool");
+  if (pool && any && pool.checked) {
+    pool.checked = false;
+    syncSwitchStyle(pool);
+  }
+  wrap.classList.toggle("opacity-50", !any && !!(pool && pool.checked));
+  wrap.classList.toggle("pointer-events-none", !any && !!(pool && pool.checked));
+}
+// 「使用公共账号池」开关：打开则清空所有已选账号并禁用列表
+function toggleKeyPool(id, on) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  if (on) wrap.querySelectorAll(".wba-key-acc").forEach(el => { el.checked = false; });
+  wrap.classList.toggle("opacity-50", !!on);
+  wrap.classList.toggle("pointer-events-none", !!on);
+}
+// 切换滑块样式（勾选状态由浏览器维护，这里只同步外观）
+function syncSwitchStyle(input) {
+  if (!input) return;
+  const track = input.parentElement;   // 外层 span = 滑轨
+  if (!track) return;
+  track.classList.toggle("bg-indigo-600", input.checked);
+  track.classList.toggle("bg-slate-300", !input.checked);
+  const knob = track.querySelector("span");
+  if (knob) knob.style.transform = input.checked ? "translateX(18px)" : "translateX(0px)";
+  // 两侧文字的高亮也要跟着换，否则开关动、标签不动会很怪
+  const label = track.parentElement;
+  if (label) {
+    const spans = label.querySelectorAll(":scope > span.text-xs");
+    if (spans.length >= 2) {
+      spans[0].className = "text-xs " + (input.checked ? "text-slate-400" : "text-slate-700 font-medium");
+      spans[1].className = "text-xs " + (input.checked ? "text-slate-700 font-medium" : "text-slate-400");
+    }
+  }
+}
+// 切换绑定方式：只改样式与提示，保留已勾选项（切模式不丢选择）
+function setKeyBindMode(id, exclusive) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  const mode = exclusive ? "exclusive" : "whitelist";
   wrap.dataset.bindMode = mode;
-  const ex = document.getElementById(id + "ModeExclusive");
-  const sh = document.getElementById(id + "ModeShared");
-  [ex, sh].forEach(b => { if (b) b.classList.remove("btn-primary", "text-white"); });
-  const active = mode === "whitelist" ? sh : ex;
-  if (active) active.classList.add("btn-primary", "text-white");
+  // 选了绑定方式 = 要用专属账号 → 自动关闭「使用公共账号池」
+  const pool = document.getElementById(id + "Pool");
+  if (pool && pool.checked) {
+    pool.checked = false;
+    syncSwitchStyle(pool);
+    wrap.classList.remove("opacity-50", "pointer-events-none");
+  }
   const hint = document.getElementById(id + "ModeHint");
   if (hint) hint.innerHTML = mode === "whitelist"
-    ? "白名单：只限制本 Key 只能使用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
+    ? "白名单：只限制本 Key 只能用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
     : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。";
 }
 function keyBindMode(id) {
   return document.getElementById(id)?.dataset.bindMode === "whitelist" ? "whitelist" : "exclusive";
 }
 function keyAccountIds(id) {
-  if (document.getElementById(id + "None")?.checked) return [];
+  // 「使用公共账号池」开关打开 → 不绑定任何账号
+  if (document.getElementById(id + "Pool")?.checked) return [];
   return [...document.querySelectorAll(`#${id} .wba-key-acc:checked`)].map(el => Number(el.value));
 }
 async function openAddKey(){
