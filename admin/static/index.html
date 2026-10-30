@@ -61,6 +61,7 @@
   <link rel="stylesheet" href="/static/vendor/tailwind/tailwind.min.css" />
   <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css" />
   <link rel="stylesheet" href="/static/growth_center.css" />
+  <link rel="stylesheet" href="/static/toggle-switch.css" />
   <style>
     /* ==========================================================================
        设计令牌（借鉴 workbuddy-switch 的设计系统）
@@ -4573,22 +4574,20 @@ function keyAccountSelect(id, options, value = 0, selectedIds = null, bindMode =
         ? "白名单：只限制本 Key 只能用勾选的账号；这些账号<b>不受影响</b>，仍留在公共池供其它 Key 使用。"
         : "专属锁定：这些账号被选中后<b>只归选中它的 Key 使用</b>，不再进公共池。多把 Key 可同时选中同一账号（叠加，互不抢占）。"}</div>
       <div id="${id}" data-bind-mode="${bindMode}" class="mt-1 max-h-44 overflow-auto border rounded-lg p-2 space-y-0.5 ${usePool ? "opacity-50 pointer-events-none" : ""}" style="border-color:var(--border)">${boxes}</div>
-      <div class="flex items-center gap-2 mt-2">${switchHTML(id + "Pool", usePool, `toggleKeyPool('${id}', this.checked)`, "不使用公共池", "使用公共账号池")}</div>
+      <div class="flex items-center gap-2 mt-2">${switchHTML(id + "Pool", usePool, `toggleKeyPool('${id}', this.checked)`, "使用公共账号池")}</div>
       <p class="text-[11px] text-slate-400 mt-1">勾选任意账号会自动关闭「使用公共账号池」；打开公共池会清空已选账号。专属锁定的账号不进公共池。停用 Key 保留绑定，解绑或删除 Key 不影响账号。</p></div>`;
   }
   return `<div class="mb-3"><label class="text-xs text-slate-500">绑定账号（可选）</label>
     <div class="mt-1">${uiSelectHTML(id, { value: String(value || 0), options })}</div>
     <p class="text-[11px] text-slate-400 mt-1">绑定后此 Key 仅使用该账号的积分和模型权益，账号不可用时不会换到其他账号。</p></div>`;
 }
-// 水平滑块开关（替代打勾）：左侧标签是「关闭态」，右侧是「打开态」
-function switchHTML(id, on, onchange, offLabel, onLabel) {
-  return `<label class="inline-flex items-center gap-2 cursor-pointer select-none">
-    <span class="text-xs ${on ? "text-slate-400" : "text-slate-700 font-medium"}">${esc(offLabel)}</span>
-    <span class="relative inline-flex items-center w-9 h-5 rounded-full transition-colors ${on ? "bg-indigo-600" : "bg-slate-300"}">
-      <input type="checkbox" id="${id}" class="sr-only" ${on ? "checked" : ""} onchange="${onchange}" />
-      <span class="absolute w-4 h-4 bg-white rounded-full shadow transition-transform" style="left:2px;transform:translateX(${on ? "18px" : "0px"})"></span>
-    </span>
-    <span class="text-xs ${on ? "text-slate-700 font-medium" : "text-slate-400"}">${esc(onLabel)}</span>
+// 水平开关：Flowbite Toggle Switch 的标记结构，样式在 toggle-switch.css。
+// 只挂**一个**标签（开关语义由开关本身表达），不再左右各写一句。
+function switchHTML(id, on, onchange, label) {
+  return `<label class="wb-toggle">
+    <input type="checkbox" id="${id}" class="wb-toggle-input" ${on ? "checked" : ""} onchange="${onchange}" />
+    <span class="wb-toggle-track"><span class="wb-toggle-thumb"></span></span>
+    <span class="wb-toggle-label">${esc(label)}</span>
   </label>`;
 }
 // 勾选/取消某个账号：只要有选中项就自动关掉「使用公共账号池」
@@ -4612,24 +4611,14 @@ function toggleKeyPool(id, on) {
   wrap.classList.toggle("opacity-50", !!on);
   wrap.classList.toggle("pointer-events-none", !!on);
 }
-// 切换滑块样式（勾选状态由浏览器维护，这里只同步外观）
+// 开关外观完全由 CSS 的 :checked 驱动（toggle-switch.css），
+// 这里只负责让被禁用/恢复的账号列表跟着开关状态联动。
 function syncSwitchStyle(input) {
   if (!input) return;
-  const track = input.parentElement;   // 外层 span = 滑轨
-  if (!track) return;
-  track.classList.toggle("bg-indigo-600", input.checked);
-  track.classList.toggle("bg-slate-300", !input.checked);
-  const knob = track.querySelector("span");
-  if (knob) knob.style.transform = input.checked ? "translateX(18px)" : "translateX(0px)";
-  // 两侧文字的高亮也要跟着换，否则开关动、标签不动会很怪
-  const label = track.parentElement;
-  if (label) {
-    const spans = label.querySelectorAll(":scope > span.text-xs");
-    if (spans.length >= 2) {
-      spans[0].className = "text-xs " + (input.checked ? "text-slate-400" : "text-slate-700 font-medium");
-      spans[1].className = "text-xs " + (input.checked ? "text-slate-700 font-medium" : "text-slate-400");
-    }
-  }
+  const wrap = document.getElementById(input.id.replace(/Pool$/, ""));
+  if (!wrap) return;
+  wrap.classList.toggle("opacity-50", input.checked);
+  wrap.classList.toggle("pointer-events-none", input.checked);
 }
 // 切换绑定方式：只改样式与提示，保留已勾选项（切模式不丢选择）
 function setKeyBindMode(id, mode) {

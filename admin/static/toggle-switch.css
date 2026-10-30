@@ -1,0 +1,94 @@
+/* ============================================================================
+   Toggle Switch —— 取自 Flowbite 的标准开关实现
+   https://flowbite.com/docs/forms/toggle/
+
+   为什么单独抽文件而不是用 Tailwind 类：
+   本项目的 tailwind.min.css 是**预编译静态产物**，只含构建当时的类
+   （`peer-checked:` / `sr-only` / `translate-x-5` 都不在里面），所以直接用
+   Tailwind 写开关会静默失效。这里把 Flowbite 那套标记对应的样式落成普通
+   CSS，既保留组件库的观感与交互，又不依赖运行时 JIT。
+
+   用法（与 Flowbite 完全一致的标记结构）：
+     <label class="wb-toggle">
+       <input type="checkbox" class="wb-toggle-input" />
+       <span class="wb-toggle-track">
+         <span class="wb-toggle-thumb"></span>
+       </span>
+       <span class="wb-toggle-label">标签文字</span>
+     </label>
+   ============================================================================ */
+
+.wb-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wb-toggle-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.wb-toggle-track {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 2.75rem;          /* w-11 */
+  height: 1.5rem;          /* h-6  */
+  background-color: #e5e7eb;  /* gray-200 */
+  border-radius: 9999px;
+  transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.wb-toggle-thumb {
+  position: absolute;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 1.25rem;          /* w-5 */
+  height: 1.25rem;         /* h-5 */
+  background-color: #fff;
+  border: 1px solid #d1d5db;  /* gray-300 */
+  border-radius: 9999px;
+  transition: transform 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 选中态：轨道变主色、圆点右移 */
+.wb-toggle-input:checked + .wb-toggle-track {
+  background-color: #4f46e5;  /* indigo-600，与后台主色一致 */
+}
+
+.wb-toggle-input:checked + .wb-toggle-track .wb-toggle-thumb {
+  transform: translateX(1.25rem);
+}
+
+/* 键盘可达性：焦点环 */
+.wb-toggle-input:focus-visible + .wb-toggle-track {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+
+/* 禁用态 */
+.wb-toggle-input:disabled + .wb-toggle-track {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wb-toggle-label {
+  font-size: 0.75rem;
+  color: #475569;          /* slate-600 */
+}
+
+.wb-toggle-input:checked ~ .wb-toggle-label {
+  color: #334155;          /* slate-700 */
+  font-weight: 500;
+}
